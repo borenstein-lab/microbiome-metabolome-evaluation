@@ -1,0 +1,352 @@
+---
+title: "Analysis of simulations with environmental fluctuations"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r, echo = F, message=F, warning=F}
+options(stringsAsFactors = F, scipen = 20)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(R.matlab)
+library(RColorBrewer)
+library(mimosa)
+library(Rcpp)
+library(pROC)
+
+homedir = "~/Documents/GS_server/PROJECTS/MORE_METABOLOMICS_CN/"
+datadir = paste0(homedir, "RESULTS/AGORA/")
+source("FBA_functions.R")
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
+media_file = "FaithMedia_AGORA_F_final.csv"
+media = fread(media_file)
+media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
+setnames(media, "V1", "medium")
+
+spec_codes = make_spec_codes()
+
+dictionary = fread("Dictionary_AGORA_complete.csv")
+dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
+dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
+dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
+dictionary[,Primary:=gsub("\\(.*\\)$","", Primary)]
+dictionary[Primary=='L-argininium', Primary:="L-arginine"]
+dictionary[Primary=="proton", Primary:="H+"]
+dictionary[Primary=="hydrogenphosphate", Primary:="Orthophosphate"]
+dictionary[grepl("Amylopectin", Primary), Primary:="Amylopectin"]
+setnames(dictionary, "Primary", "Metabolite")
+kegg_translate = dictionary[,list(Metabolite, medium)]
+dictionary[,niceLab:=tolower(Metabolite)]
+
+path_key = fread("hmdb_brite_metabolite_classes.txt")
+path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
+path_key[,Metabolite:=NULL]
+
+##Color scale for plotting species
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_spec = c(getPalette(10), "grey50", "grey20")
+names(col_spec) = c(spec_codes[1:10][order(SpeciesName), Code], "in", "out")
+col_spec2 = col_spec
+names(col_spec2) = c(spec_codes[1:10][order(SpeciesName), SpeciesName], "Inflow", "Outflow")
+
+timePointFinal = 577
+
+all_species = fread("allSpeciesMain.txt")
+all_species[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
+all_species = merge(all_species, spec_codes, by = c("Species", "Code"), all.x=T, all.y=F)
+fake_spec = all_species[TimePoint==timePointFinal]
+fake_spec[,SampleID:=SimRun]
+fake_spec[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
+all_mets = fread("allMetabolitesMain.txt")
+bad_mets1 = all_mets[,length(value[value !=0]),by=medium][V1==0,medium]
+all_mets = all_mets[!Metabolite %in% bad_mets1]
+all_mets[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
+
+fake_mets = dcast(all_mets[TimePoint==timePointFinal], medium+Metabolite~Sample)
+fake_mets_melt = melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
+all_mets[,Time:=TimePoint/4]
+
+fake_mets_melt = merge(fake_mets_melt, path_key, by = "medium", all.x=T)
+
+met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), niceLab]
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(Metabolite,medium)]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+
+all_met_fluxes_final1 = fread("allMetFluxesFinalMain.txt")
+all_met_fluxes_final1[,niceLab:=factor(niceLab, levels = met_order)]
+
+shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key)
+shap_contribs1[,niceLab:=factor(tolower(niceLab), levels=met_order)]
+
+var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+
+shap_contribs1[TrueVar > var_cutoff, unique(niceLab)]
+shap_contribs = shap_contribs1[TrueVar > var_cutoff]
+orig_mets = shap_contribs[,unique(compound)]
+
+noiseLevels = c(0.02, 0.05, 0.1, 0.15, 0.2, 0)
+noiseLevels = c(0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.08, 0.1, 0)
+contrib_threshold_pos = 0.1
+contrib_threshold_mag = 0.2
+
+fake_mets_melt_good = fake_mets_melt[niceLab %in% shap_contribs[,niceLab]]
+spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt_good, shap_contribs)
+spec_met_corrs[,noiseLevel:=0]
+```
+
+Get all contributions with correct classification
+
+```{r, echo=F, message=F, warning=F}
+#### Look at contribs
+shap_contribs[,noiseLevel:=0]
+shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
+shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
+shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+
+all_shap_contribs = shap_contribs
+
+for(j in 1:(length(noiseLevels)-1)){
+  shap_contribs = fread(paste0(datadir, "noisyMedia_AGORA577_nm_", noiseLevels[j]*100, "_contribs.txt"))
+  shap_contribs[,noiseLevel:=noiseLevels[j]]
+  shap_contribs = shap_contribs[TrueVar > var_cutoff]
+  shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
+  shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
+  shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+  shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+  all_shap_contribs = rbind(all_shap_contribs, shap_contribs, fill = T)
+}
+all_shap_contribs[Metabolite=='L-lysinium(1+)', Metabolite:="L-lysine"]
+all_shap_contribs[,Metabolite:=gsub(" \\(.*\\)$","", Metabolite)]
+all_shap_contribs[,Metabolite:=gsub("\\(.*\\)$","", Metabolite)]
+all_shap_contribs[Metabolite=='L-argininium', Metabolite:="L-arginine"]
+all_shap_contribs[Metabolite=="proton", Metabolite:="H+"]
+all_shap_contribs[Metabolite=="hydrogenphosphate", Metabolite:="Orthophosphate"]
+
+all_shap_contribs[,niceLab:=tolower(Metabolite)]
+
+#other_mets = all_shap_contribs[!niceLab %in% met_order, unique(niceLab)]
+all_shap_contribs[,niceLab:=factor(niceLab, levels=met_order)]
+all_shap_contribs[,mediaMet:=ifelse(compound %in% media[,medium], 1, 0)]
+
+```
+
+Get spec-met correlation comparisons
+
+```{r, echo=F, message=F, warning=F}
+spec_met_corrs = spec_met_corrs[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs, noiseLevel)]
+spec_met_corrs = merge(spec_met_corrs, all_shap_contribs[noiseLevel==0], by=c("Species", "compound", "noiseLevel"))
+
+spec_met_corrs_all = spec_met_corrs
+for(j in 1:(length(noiseLevels)-1)){
+  spec_met_corrs = fread(paste0(datadir, "noisyMedia_AGORA577_nm_", noiseLevels[j]*100, "_metCorrs.txt"))
+  spec_met_corrs = spec_met_corrs[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs)]
+  spec_met_corrs[,noiseLevel:=noiseLevels[j]]
+  spec_met_corrs = merge(spec_met_corrs, all_shap_contribs[noiseLevel==noiseLevels[j]], by = c("Species", "compound", "noiseLevel"), all.x = T)
+  #spec_met_corrs = getScaledContribs(spec_met_corrs)
+  spec_met_corrs_all = rbind(spec_met_corrs_all, spec_met_corrs, fill = T)
+}
+spec_met_corrs_all[,niceLab:=tolower(Metabolite)]
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==1, "True positive", "True negative")]
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==0, "False positive", Outcome_v2)]
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value > 0.01 & BinaryContribPos==1, "False negative", Outcome_v2)]
+
+media_mets = media[,medium]
+spec_met_corrs_all[,mediaMet:=ifelse(compound %in% media_mets, 1, 0)]
+
+#Specificity
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=noiseLevel]
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=list(mediaMet,noiseLevel)]
+#sens
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=noiseLevel]
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=list(mediaMet, noiseLevel)]
+#ppv
+spec_met_corrs_all[compound %in% orig_mets & p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=noiseLevel]
+spec_met_corrs_all[compound %in% orig_mets & p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=list(mediaMet, noiseLevel)]
+#accuracy
+spec_met_corrs_all[compound %in% orig_mets, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=noiseLevel]
+spec_met_corrs_all[compound %in% orig_mets, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=list(mediaMet,noiseLevel)]
+
+all_shap_contribs[,Code2:=ifelse(Code.x=="in", "Inflow", Code.x)]
+all_shap_contribs[,Code2:=factor(Code2, levels = c(spec_codes[1:10, Code], "Inflow"))]
+col_spec1 = col_spec
+names(col_spec1)[11] = "Inflow"
+
+##How many contributors?
+num_contribs_plot = ggplot(all_shap_contribs[compound %in% orig_mets & BinaryContribPos==1], aes(x=factor(noiseLevel), fill = Code2)) + geom_bar(stat = "count", position = "stack") + scale_fill_manual(values = col_spec1) + scale_y_continuous(expand = c(0, 0, 0.1, 0)) + theme(axis.ticks = element_blank(), legend.title = element_blank()) + xlab("Inflow % standard deviation") + ylab("Number of key contributors") + theme(axis.text = element_text(size=8), axis.title = element_text(size=9), legend.text = element_text(size = 8))
+
+#Contributor survival plot
+spec_contribs = all_shap_contribs[,sum(BinaryContribPos), by=list(mediaMet, noiseLevel, Code2)]
+spec_contribs[,mediaMet:=ifelse(mediaMet==1, "Inflow metabolites", "Non-inflow metabolites")]
+contrib_survival = ggplot(spec_contribs[Code2 != "Inflow" & Code2 != "Bc"], aes(x=noiseLevel, y = V1, col=Code2)) + geom_point(alpha = 0.8) + geom_line()+ facet_wrap(~mediaMet) + scale_color_manual(values = col_spec1) + scale_y_continuous(expand = c(0,0, 0.2, 0.1), name = "Number of key contributions") + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), strip.text = element_text(size=9), legend.text = element_text(size=8)) + xlab("Inflow % standard deviation")
+
+#Example plot
+met_sub_dat = all_shap_contribs[niceLab=="l-valine"]
+met_sub_dat[,SpeciesName:=factor(SpeciesName, levels = spec_codes[,SpeciesName])]
+
+fig_example = ggplot(met_sub_dat[noiseLevel %in% c(0, 0.01, 0.05,0.1)], aes(y=VarShare, x = Code2, fill = Code2)) + geom_bar(stat = "identity") + facet_wrap(~noiseLevel, nrow = 1) + scale_fill_manual(values = col_spec1) + geom_abline(intercept = 0, slope = 0, linetype = 2) + theme(strip.background = element_blank(), axis.ticks.y = element_blank(), axis.text.x = element_text(size=6), axis.title.x = element_text(size=8), axis.text.y = element_blank(), legend.title = element_blank(), axis.title.y = element_text(angle=0), panel.spacing = unit(0.15, "inches"), plot.margin = margin(0.2, 0.4, 0.3, 0.1, "inches")) + ylab("Relative contribution to variance") +xlab("L-Valine")+ coord_flip() + guides(fill = guide_legend(reverse = T))
+
+
+contrib_plots = plot_grid(plot_grid(fig_example + guides(fill = guide_legend(ncol = 1, reverse = T)) + theme(legend.text = element_text(size=8), strip.text = element_text(size=10), axis.title.y = element_text(size=11), plot.margin = margin(0.2, 0.2, 0, 0.2, "inches"), legend.key.size = unit(0.13, "inches")), labels = "Inflow % standard deviation", label_x = 0, label_y = 0.94, label_fontface="plain", label_size = 9), contrib_survival + guides(color = guide_legend(reverse = T)) + theme(plot.margin = margin(0.25, 0.25, 0.25, 0.25, "inches")), nrow = 2, labels= c("A", "B"), rel_heights = c(1, 1.3))
+
+
+```
+
+
+Define bins of metabolites in noise levels by contribution
+
+```{r, echo=F, message=F, warning=F}
+
+env_contribs = all_shap_contribs[SpeciesName=="Inflow" & V1 != 0]
+setnames(env_contribs, c("VarShare", "PosVarShare", "VarShareMagnitude"), c("EnvVarShare", "EnvPosVarShare", "EnvVarShareMagnitude"))
+env_contribs[,EnvBinaryContribPos:=ifelse(EnvPosVarShare > contrib_threshold_pos, 1, 0)]
+env_contribs[,EnvBinaryContribMag:=ifelse(EnvVarShareMagnitude > contrib_threshold_mag, 1, 0)]
+
+spec_met_corrs_all = merge(spec_met_corrs_all, env_contribs[,list(niceLab, noiseLevel, EnvVarShare, EnvPosVarShare, EnvVarShareMagnitude, EnvBinaryContribPos, EnvBinaryContribMag)], by=c("niceLab", "noiseLevel"), all.x = T)
+
+env_contribs[,EnvPerc:=cut(EnvPosVarShare, breaks = seq(0, 1, by=0.1), include.lowest = T, ordered_result = T)]
+
+spec_met_corrs_all[is.na(EnvPosVarShare), EnvPosVarShare:=0]
+spec_met_corrs_all[,EnvPerc:=cut(EnvPosVarShare, breaks = seq(0, 1, by=0.1), include.lowest = T, ordered_result = T)]
+
+spec_met_corrs_all[,EnvPerc2:=ifelse(mediaMet==0 & noiseLevel != 0, -1, EnvPerc)]
+spec_met_corrs_all[noiseLevel==0, EnvPerc2:=-2]
+spec_met_corrs_all[,table(EnvPerc2)]
+spec_met_corrs_all[EnvPerc2==10, table(p.value < 0.01)]
+spec_met_corrs_all[compound %in% orig_mets, table(EnvPerc2,p.value < 0.01)]
+
+spec_met_corrs_all[compound %in% orig_mets,qval:=correct(p.value, method="fdr")]
+#Use only original compounds for everything going forward
+spec_met_corrs_sub = spec_met_corrs_all[compound %in% orig_mets & EnvPerc2 < 10]
+
+env_mets = spec_met_corrs_all[compound %in% orig_mets,sum(p.value < 0.01), by=list(niceLab, noiseLevel, EnvPerc2)]
+env_mets[,EnvMet:=ifelse(EnvPerc2 ==10, 1, 0)]
+num_mets = env_mets[,length(niceLab), by=EnvPerc2]
+setnames(num_mets, "V1", "NumMetIters")
+spec_met_corrs_sub = merge(spec_met_corrs_sub, num_mets, by = "EnvPerc2", all.x=T)
+
+spec_met_corrs_sub[,EnvPercLabel:=ifelse(EnvPerc2==-1, "Non-\ninflow", paste0(EnvPerc2-1, "0%-\n", EnvPerc2, "0%"))]
+spec_met_corrs_sub[grepl("^00", EnvPercLabel), EnvPercLabel:=paste0(EnvPerc2-1, "%-\n", EnvPerc2, "0%")]
+spec_met_corrs_sub[EnvPerc2==-2, EnvPercLabel:="Orig"]
+spec_met_corrs_sub[,EnvPercLabel2:=paste0(EnvPercLabel, "\n(", NumMetIters, ")")]
+spec_met_corrs_sub[,EnvPercLabel2:=factor(EnvPercLabel2, levels = c(spec_met_corrs_sub[,sort(unique(EnvPercLabel2))][c(11, 10, 1:9)]))] 
+spec_met_corrs_sub[,EnvPercLabel:=factor(EnvPercLabel, levels = c(spec_met_corrs_sub[,sort(unique(EnvPercLabel))][c(11, 10, 1:9)]))] 
+spec_met_corrs_sub[,CorrResult:=ifelse(p.value < 0.01, "C", "N")]
+
+spec_met_corrs_all = merge(spec_met_corrs_all, num_mets, by = "EnvPerc2", all.x=T)
+spec_met_corrs_all[,EnvPercLabel:=ifelse(EnvPerc2==-1, "Non-\ninflow", paste0(EnvPerc2-1, "0%-\n", EnvPerc2, "0%"))]
+spec_met_corrs_all[grepl("^00", EnvPercLabel), EnvPercLabel:=paste0(EnvPerc2-1, "%-\n", EnvPerc2, "0%")]
+spec_met_corrs_all[EnvPerc2==-2, EnvPercLabel:="Orig"]
+spec_met_corrs_all[,EnvPercLabel2:=paste0(EnvPercLabel, "\n(", NumMetIters, ")")]
+spec_met_corrs_all[,EnvPercLabel2:=factor(EnvPercLabel2, levels = c(spec_met_corrs_all[,sort(unique(EnvPercLabel2))][c(12, 11, 1:10)]))] 
+spec_met_corrs_all[,EnvPercLabel:=factor(EnvPercLabel, levels = c(spec_met_corrs_all[,sort(unique(EnvPercLabel))][c(12, 11, 1:10)]))] 
+spec_met_corrs_all[,CorrResult:=ifelse(p.value < 0.01, "C", "N")]
+spec_met_corrs_all[,BinaryContribWord:=ifelse(BinaryContribPos==1, "Key contributor", "No contribution")]
+
+
+barpot_noise2b = ggplot(spec_met_corrs_all[compound %in% orig_mets], aes(x=CorrResult, fill = BinaryContribWord)) + geom_bar(stat="count") + facet_wrap(~EnvPercLabel2, nrow=1) + theme(legend.title = element_blank()) + scale_y_continuous(expand = c(0,0,0.1, 0)) + scale_fill_manual(values = c("grey50","grey80")) + theme(axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text = element_text(size = 6.5), axis.title = element_text(size=9), axis.text = element_text(size=8), legend.text = element_text(size=9)) + xlab("Correlation status") +ylab("Number of metabolite instances")#+ geom_text(aes(label = NumMetIters))
+
+
+```
+
+Look at species-metabolite pairs that are always correlated
+
+```{r, echo=F, message=F, warning=F}
+
+persistent_pairs = spec_met_corrs_all[compound %in% orig_mets,list(sum(p.value < 0.01)/length(p.value), sum(p.value < 0.01)), by=list(niceLab, Code.x)]
+persistent_pairs[,alwaysCorr:=ifelse(V1==1, 1, 0)]
+setnames(persistent_pairs, "V2", "numCorrs")
+spec_met_corrs_all = merge(spec_met_corrs_all, persistent_pairs[,list(niceLab, Code.x, alwaysCorr)], by = c("niceLab", "Code.x"), all.x = T)
+spec_met_corrs_all[compound %in% orig_mets & EnvPerc2 != 9,sum(BinaryContribPos)/length(BinaryContribPos), by=alwaysCorr]
+pair_outcomes = spec_met_corrs_all[compound %in% orig_mets,list(sum(BinaryContribPos), length(BinaryContribPos)), by=list(niceLab, Code.x)]
+pair_outcomes = merge(pair_outcomes, persistent_pairs[,list(niceLab, Code.x, alwaysCorr, numCorrs)], by = c("niceLab", "Code.x"), all = T)
+pair_outcomes[,mean(V1/V2), by=alwaysCorr]
+pair_outcomes[,table(V1 >1, alwaysCorr, useNA="ifany")]
+pair_outcomes[,table(numCorrs)]
+pair_outcomes[is.na(alwaysCorr), alwaysCorr:=0]
+pair_outcomes[,fisher.test(V1 >0, alwaysCorr)]
+pair_outcomes[alwaysCorr==1, sum(V1 >0)/length(V1)]
+pair_outcomes[numCorrs > 0, fisher.test(V1 > 0, alwaysCorr)]
+pair_outcomes[,cor.test(numCorrs, V1, method="spearman")]
+pair_outcomes[(numCorrs==1|numCorrs==9), fisher.test(V1 > 0, alwaysCorr)]
+
+```
+
+
+AUCs, summary stats by bin, Figure 5
+
+```{r, echo=F, message=F, warning=F}
+env_perc_aucs = data.table(EnvPerc2 = spec_met_corrs_sub[,levels(factor(EnvPerc2))])
+ROCs_envContrib_perc = list()
+for(j in 1:nrow(env_perc_aucs)){
+  ROCs_envContrib_perc[[j]] = roc(spec_met_corrs_sub[EnvPerc2==env_perc_aucs[j,EnvPerc2] & compound %in% orig_mets, BinaryContribPos], spec_met_corrs_sub[EnvPerc2==env_perc_aucs[j,EnvPerc2] & compound %in% orig_mets, CorScaleAbs], ci = T, ci.method = "bootstrap", boot.n = 500)
+  env_perc_aucs[j,AUC:=ROCs_envContrib_perc[[j]]$auc]
+  env_perc_aucs[j,AUCUpper:=ROCs_envContrib_perc[[j]]$ci[3]]
+  env_perc_aucs[j,AUCLower:=ROCs_envContrib_perc[[j]]$ci[1]]
+}
+env_perc_aucs[,EnvPercLabel:=factor(spec_met_corrs_sub[,levels(EnvPercLabel)], levels = spec_met_corrs_sub[,levels(EnvPercLabel)])]
+
+#sens/spec/ppv by category
+spec_met_corrs_all[compound %in% orig_mets,sum(p.value[BinaryContribPos==1] < 0.01)/length(p.value[BinaryContribPos==1]), by=EnvPerc2]
+spec_met_corrs_all[compound %in% orig_mets,sum(p.value[BinaryContribPos==0] > 0.01)/length(p.value[BinaryContribPos==0]), by=EnvPerc2]
+spec_met_corrs_all[compound %in% orig_mets,sum(BinaryContribPos[p.value < 0.01])/sum(p.value < 0.01), by=EnvPerc2]
+
+spec_met_corrs_sub[,simGroup:=ifelse(EnvPercLabel=="Orig", "Orig", "Other")]
+spec_met_corrs_sub[,simGroup:=ifelse(EnvPercLabel=="Non-\ninflow", "Non-inflow", simGroup)]
+
+summary_stats_by_contrib = rbind(data.table(spec_met_corrs_sub[BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=list(simGroup,EnvPerc2,EnvPercLabel)], Stat="Specificity"), data.table(spec_met_corrs_sub[BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=list(simGroup,EnvPerc2,EnvPercLabel)], Stat = "Sensitivity"), data.table(spec_met_corrs_sub[ p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=list(simGroup, EnvPerc2,EnvPercLabel)], Stat = "PPV"), data.table(spec_met_corrs_sub[, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=list(simGroup,EnvPerc2,EnvPercLabel)], Stat = "Accuracy"))
+summary_stats_by_contrib[Stat=="PPV", Stat:="Positive predictive value"]
+summary_stats_by_contrib[,EnvPercLabel:=factor(EnvPercLabel, levels = env_perc_aucs[,levels(EnvPercLabel)])]
+
+summary_stats_contrib_plot1 = ggplot(summary_stats_by_contrib[Stat != "Accuracy"], aes(x=EnvPercLabel, y = V1, color=Stat, shape = factor(simGroup))) + geom_point(size = 1.5) + geom_line(aes(group=interaction(Stat, simGroup)))+ theme(legend.title = element_blank()) + ylab("") + scale_color_manual(values = c(scales::muted("red"), scales::muted("blue"), scales::muted("green")))  + ylim(0,1) + theme(axis.title.x = element_text(size=9),axis.ticks.x = element_blank(), axis.text = element_text(size=8), legend.text = element_text(size=9)) + scale_x_discrete(name = "Environmental contribution", expand = c(0.03,0)) + guides(shape = F) 
+
+ROC_dat = rbindlist(lapply(1:length(ROCs_envContrib_perc), function(x){
+  return(data.table(EnvPercLabel = env_perc_aucs[x,EnvPercLabel],tpr = ROCs_envContrib_perc[[x]]$sensitivities, fpr = 1-ROCs_envContrib_perc[[x]]$specificities))
+  data.table()
+}))
+ROC_dat[,EnvPercLabel2:=gsub("-\n", "-", as.character(EnvPercLabel))]
+ROC_dat[,EnvPercLabel2:=factor(EnvPercLabel2, levels = sort(unique(EnvPercLabel2))[c(11, 10, 1:9)])]
+more_purples = colorRampPalette(brewer.pal(9, "Purples"))
+
+roc_perc_plot = ggplot(ROC_dat, aes(x=fpr, y = tpr, color = EnvPercLabel2)) + geom_abline(slope=1, intercept=0, linetype=2)+ geom_line(size = 0.8) + scale_y_continuous(expand = c(0,0)) + scale_x_continuous(expand = c(0,0)) + scale_color_manual(values=rev(more_purples(14)[4:14])) + xlab("FPR") + ylab("TPR") + theme(legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), legend.text = element_text(size=7.5)) 
+
+compare_plot2 = plot_grid(plot_grid(barpot_noise2b + theme(plot.margin = margin(0.2, 0.2, 0.05, 0.2, "inches"), legend.key.size = unit(0.12, "inches"), panel.spacing.x = unit(0.01, "inches"),panel.background = element_blank(), plot.background = element_blank(),panel.border = element_rect()), summary_stats_contrib_plot1 +  theme(plot.margin = margin(0.01, 0.0, 0.2, 0.2, "inches"),legend.key.width = unit(0.12, "inches")), nrow=2, align = "v", axis = "l", labels = c("C", "D")) + draw_label("C: Correlated\nN: Not correlated", x = 0.78, y = 0.575, size=7.5, hjust=0))
+
+fig5 = plot_grid(plot_grid(contrib_plots, compare_plot2, nrow = 1, rel_widths = c(0.9,1)),
+                 roc_perc_plot + theme(plot.margin = margin(0.15, 3.4, 0.15, 3.6, "inches"), legend.position = "right")+ guides(col = guide_legend(ncol=2)), nrow = 2, rel_heights = c(1.7, 1), labels = c("", "E"), label_x = 0.26)
+
+save_plot(fig5, file = "Figure5_env.png", base_width = 11.5, base_height = 6.5)
+
+
+```
+
+
+Compare non-inflow metabolites with increasing noise - figure s7
+
+```{r, echo=F, message=F, warning=F}
+#Are all metabolites more variable w/ more env noise?
+all_vars = unique(all_shap_contribs[,list(noiseLevel, mediaMet, compound, niceLab, TrueVar, Mean)])
+
+met_level_outcomes = dcast(spec_met_corrs_sub, niceLab+noiseLevel+mediaMet+TrueVar~Outcome_v2)
+met_level_outcomes[,cor(TrueVar, `True positive`+`True negative`), by=list(niceLab, mediaMet)]
+met_level_outcomes[,cor(TrueVar, `True positive`/(`True positive`+`False negative`)), by=list(niceLab, mediaMet)]
+increasingVar = all_vars[,list(cor(TrueVar, noiseLevel, method = "spearman"), cor.test(TrueVar, noiseLevel, method = "spearman")$p.value),by=niceLab]
+met_level_outcomes = merge(met_level_outcomes, increasingVar, by = "niceLab")
+met_level_outcomes[,VarAssoc:=ifelse(V2 < 0.01, 1, 0)]
+spec_met_corrs_sub = merge(spec_met_corrs_sub, met_level_outcomes[,list(niceLab, noiseLevel, VarAssoc)], by = c("niceLab", "noiseLevel"))
+
+summary_stats_by_contrib3 = rbind(data.table(spec_met_corrs_sub[BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=list(mediaMet, VarAssoc, noiseLevel, EnvPerc2)], Stat="Specificity"), data.table(spec_met_corrs_sub[BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=list(mediaMet,VarAssoc, noiseLevel, EnvPerc2)], Stat = "Sensitivity"), data.table(spec_met_corrs_sub[ p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=list(mediaMet, VarAssoc, noiseLevel, EnvPerc2)], Stat = "PPV"), data.table(spec_met_corrs_sub[, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=list(mediaMet,VarAssoc, noiseLevel,EnvPerc2)], Stat = "Accuracy"))
+summary_stats_by_contrib3[,mediaMet:=ifelse(mediaMet==1, "Environmental", "Microbial")]
+summary_stats_by_contrib3[,VarAssoc:=ifelse(VarAssoc==1, "Variance increases with inflow", "Constant variance")]
+
+summary_stats_contrib_plot3 = ggplot(summary_stats_by_contrib3[mediaMet=="Microbial" & Stat != "Accuracy" & Stat != "PPV"], aes(x=noiseLevel, y = V1, color=Stat, shape = VarAssoc)) + geom_point(size = 1.5)  + geom_line()+ theme(legend.title = element_blank()) + ylab("") + xlab("Inflow standard deviation")  + ylim(0,1)+ scale_color_manual(values = c(scales::muted("red"), scales::muted("blue"), scales::muted("green")))+ theme(strip.background = element_blank()) 
+save_plot(summary_stats_contrib_plot3, file = "figure_s7_microbialMets_varNoisePlot.png", base_width = 6.2, base_height = 3.5)
+
+
+```
+
+
+
