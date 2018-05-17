@@ -20,15 +20,24 @@ homedir = "~/Documents/GS_server/PROJECTS/MORE_METABOLOMICS_CN/"
 datadir = paste0(homedir, "RESULTS/AGORA/")
 source("FBA_functions.R")
 
-##Reference information: Media, species IDs & categories, metabolite IDs & categories
+#Data Files
 media_file = "FaithMedia_AGORA_F_final.csv"
+dictionary_file = "Dictionary_AGORA_complete.csv"
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+spec_file = "allSpeciesFinalMain.txt"
+met_file = "allMetabolitesFinalMain.txt"
+spec_example_file = "allSpeciesExampleRun.txt"
+flux_example_file = "exampleAcetateFluxes.txt"
+all_fluxes_file = "allMetFluxesFinalMain.txt"
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
 media = fread(media_file)
 media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
 setnames(media, "V1", "medium")
 
 spec_codes = make_spec_codes()
 
-dictionary = fread("Dictionary_AGORA_complete.csv")
+dictionary = fread(dictionary_file)
 dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
 dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
 dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
@@ -42,7 +51,7 @@ kegg_translate = dictionary[,list(Metabolite, medium)]
 #dictionary_sub = dictionary[medium %in% all_mets[,unique(medium)]]
 dictionary[,niceLab:=tolower(Metabolite)]
 
-path_key = fread("hmdb_brite_metabolite_classes.txt")
+path_key = fread(met_key_file)
 path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
 path_key[,Metabolite:=NULL]
 
@@ -60,22 +69,23 @@ timePointFinal = 577
 Species abundance data:
 
 ```{r, echo=F, message=F, warning=F}
-all_species = fread("allSpeciesMain.txt")
-all_species[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
-all_species = merge(all_species, spec_codes, by = c("Species", "Code"), all.x=T, all.y=F)
+# all_species = fread("allSpeciesMain.txt")
+# all_species[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
+# all_species = merge(all_species, spec_codes, by = c("Species", "Code"), all.x=T, all.y=F)
+# 
+# #How many reach steady state?
+# #define as abundance change < 1% of capacity (0.433/100) over last 12 time points (3 hours)
+# all_species[,TimePoint0:=TimePoint-1]
+# perc_change = merge(all_species[,list(SimRun, Species,TimePoint,value)], all_species[,list(SimRun,Species,TimePoint0,value)], by.x = c("SimRun","Species","TimePoint"), by.y = c("SimRun", "Species","TimePoint0"))
+# perc_change[,percChange:=(value.x-value.y)/value.x]
+# perc_change[,absChange:=value.x-value.y]
+# perc_change = perc_change[TimePoint >= (timePointFinal-12)]
+# perc_change[,max(abs(absChange)), by=list(Species, SimRun)][,max(V1), by=SimRun][,table(V1 < 0.433/10000)]
 
-#How many reach steady state?
-#define as abundance change < 1% of capacity (0.433/100) over last 12 time points (3 hours)
-all_species[,TimePoint0:=TimePoint-1]
-perc_change = merge(all_species[,list(SimRun, Species,TimePoint,value)], all_species[,list(SimRun,Species,TimePoint0,value)], by.x = c("SimRun","Species","TimePoint"), by.y = c("SimRun", "Species","TimePoint0"))
-perc_change[,percChange:=(value.x-value.y)/value.x]
-perc_change[,absChange:=value.x-value.y]
-perc_change = perc_change[TimePoint >= (timePointFinal-12)]
-perc_change[,max(abs(absChange)), by=list(Species, SimRun)][,max(V1), by=SimRun][,table(V1 < 0.433/10000)]
-
-
-fake_spec = all_species[TimePoint==timePointFinal]
+#fake_spec = all_species[TimePoint==timePointFinal]
+fake_spec = fread(spec_file)
 fake_spec[,SampleID:=SimRun]
+fake_spec = merge(fake_spec, spec_codes, by = c("Species", "Code"))
 fake_spec[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] 
 
 fake_spec[,axisLabel:=factor(ifelse(SimRun==3, "*", SimRun), levels = c(1:2, "*", 4:max(SimRun)))]
@@ -87,7 +97,10 @@ spec_plot = ggplot(fake_spec, aes(x=factor(axisLabel), y = value, fill = Species
 
 spec_plot = plot_grid(spec_plot, labels = c("Sample"), label_x=0.385, label_y=0.163, label_fontface = "plain")
 
-spec_example_plot = ggplot(all_species[SimRun %in% c(3) & TimePoint <= timePointFinal & (TimePoint-1) %% 8==0], aes(x=Time, y = value, col=SpeciesName, size = TimePoint==timePointFinal)) + geom_point() + facet_wrap(~SimRun) + scale_color_manual(values=col_spec2) + scale_size_manual(values = c(0.9, 2.25)) + theme(legend.title = element_blank(), legend.text = element_text(face="italic"), strip.background = element_blank(), strip.text = element_blank(), axis.ticks = element_blank(), axis.text = element_text(size=14), axis.title = element_text(size=14), axis.line = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), plot.background = element_blank(), panel.background = element_blank(), panel.border = element_rect(fill=NA, color = "black", size = 1, linetype="solid")) + ylab("Species absolute abundance") + scale_x_continuous(breaks = c(0,24, 48,72, 96, 120), expand = c(0.02,0, 0.1, 0)) + scale_y_continuous(expand = c(0.02,0, 0.1, 0)) + xlab("Time (hours)") + guides(size = F, col = F)
+example_dat = fread(spec_example_file)
+example_dat[,Time:=TimePoint/4]
+example_dat = merge(example_dat, spec_codes, by = c("Species", "Code"))
+spec_example_plot = ggplot(example_dat[(TimePoint-1) %% 8==0], aes(x=Time, y = value, col=SpeciesName, size = TimePoint==timePointFinal)) + geom_point() + facet_wrap(~SimRun) + scale_color_manual(values=col_spec2) + scale_size_manual(values = c(0.9, 2.25)) + theme(legend.title = element_blank(), legend.text = element_text(face="italic"), strip.background = element_blank(), strip.text = element_blank(), axis.ticks = element_blank(), axis.text = element_text(size=14), axis.title = element_text(size=14), axis.line = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), plot.background = element_blank(), panel.background = element_blank(), panel.border = element_rect(fill=NA, color = "black", size = 1, linetype="solid")) + ylab("Species absolute abundance") + scale_x_continuous(breaks = c(0,24, 48,72, 96, 120), expand = c(0.02,0, 0.1, 0)) + scale_y_continuous(expand = c(0.02,0, 0.1, 0)) + xlab("Time (hours)") + guides(size = F, col = F)
 
 ```
 
@@ -95,16 +108,16 @@ spec_example_plot = ggplot(all_species[SimRun %in% c(3) & TimePoint <= timePoint
 Metabolite concentration data:
 
 ```{r, echo=F, message=F, warning=F}
-all_mets = fread("allMetabolitesMain.txt")
-bad_mets1 = all_mets[,length(value[value !=0]),by=medium][V1==0,medium]
-all_mets = all_mets[!Metabolite %in% bad_mets1]
-all_mets[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
 
-fake_mets = dcast(all_mets[TimePoint==timePointFinal], medium+Metabolite~Sample)
-fake_mets_melt = melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
-all_mets[,Time:=TimePoint/4]
+fake_mets_melt = fread(met_file)
+fake_mets_melt = merge(fake_mets_melt, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
+fake_mets_melt[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
+fake_mets_melt[,Run:=gsub("_.*", "", Sample)]
+fake_mets_melt[,Run:=as.numeric(gsub("run", "", Run))]
 
-fake_mets_melt = merge(fake_mets_melt, path_key, by = "medium", all.x=T)
+met_list = fake_mets_melt[,unique(niceLab)]
+met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), as.character(niceLab)]
+fake_mets_melt[,niceLab:=factor(niceLab, levels = met_order)]
 
 ```
 
@@ -121,19 +134,23 @@ Example plot of fluxes
 # ac_fluxes = getCorrectTotalFluxes(ac_media, all_mets[Metabolite=="acetate"], media, all_species, growthRates, disperse_outflow = F, max_tp = timePointFinal)
 # ac_fluxes = merge(ac_fluxes, spec_codes, by="Species", all.x=T)
 # write.table(ac_fluxes[,list(SimRun, TimePoint, Metabolite, medium, Species, Code, totFlux, cumulFlux)], file = "exampleAcetateFluxes.txt", quote=F, row.names=F, sep = "\t")
-ac_fluxes = fread("exampleAcetateFluxes.txt")
-ac_fluxes = merge(ac_fluxes, spec_codes, by = c("Species", "Code"))
-ac_fluxes = merge(ac_fluxes, path_key, by = "medium", all.x=T)
-ac_conc = all_mets[medium=="ac[env]"]
-ac_conc[,Species:="Concentration"]
-ac_conc[,SpeciesName:="Concentration"]
-ac_conc[,cumulFlux:=value]
-ac_conc[,totFlux:=value]
-ac_fluxes = rbind(ac_fluxes, ac_conc, fill = T)
+# ac_fluxes = fread("exampleAcetateFluxes.txt")
+# ac_fluxes = merge(ac_fluxes, spec_codes, by = c("Species", "Code"))
+# ac_fluxes = merge(ac_fluxes, path_key, by = "medium", all.x=T)
+# ac_conc = all_mets[medium=="ac[env]"]
+# ac_conc[,Species:="Concentration"]
+# ac_conc[,SpeciesName:="Concentration"]
+# ac_conc[,cumulFlux:=value]
+# ac_conc[,totFlux:=value]
+# ac_fluxes = rbind(ac_fluxes, ac_conc, fill = T)
+# write.table(ac_fluxes, file = "exampleAcetateFluxes.txt")
+ac_fluxes = fread(flux_example_file)
 good_spec = ac_fluxes[,length(totFlux[totFlux != 0]), by=Species][V1 !=0 & Species != "Outflow", Species]
 ac_fluxes[,Time:=TimePoint/4]
 ac_fluxes[,type:=ifelse(Species=="Concentration", "Acetate concentration", "Acetate cumulative flux")]
 ac_fluxes[,type:=factor(type, levels = c("Acetate cumulative flux","Acetate concentration"))]
+ac_fluxes = merge(ac_fluxes, spec_codes, by = c("Species", "Code"), all.x=T)
+ac_fluxes[type=="Acetate concentration", SpeciesName:="Concentration"]
 
 met_flux_example_plot3 = ggplot(ac_fluxes[SimRun==3 & TimePoint <= timePointFinal & Metabolite=="acetate" & Species %in% good_spec & (TimePoint-1) %% 8==0], aes(x=Time, y = cumulFlux, col=SpeciesName, group=SpeciesName, shape = factor(ifelse(SpeciesName=="Concentration", 1, 0)), size = TimePoint==timePointFinal))  +geom_point() + facet_grid(type~., scales = "free_y", switch = "y") + theme(strip.placement = "outside", legend.title = element_blank(), legend.text = element_text(face="italic"), strip.background = element_blank(), axis.ticks = element_blank(), axis.text = element_text(size=14), axis.title = element_text(size=14), strip.text = element_text(size=14), panel.spacing.y = unit(0.2, "inches"), plot.margin = margin(0.3, 0.3, 0.3, 0, "inches"), panel.background = element_blank(), plot.background = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_blank(), panel.border = element_rect(colour = "black", fill=NA, size = 1, linetype="solid")) + ylab("") +xlab("Time (hours)") + scale_size_manual(values = c(1.2,3))+ scale_x_continuous(breaks = c(0,24, 48, 72, 96, 120), expand = c(0.03,0, 0.1, 0.1), limits = c(0, NA)) + scale_y_continuous(expand = c(0.04,0, 0.1, 0.1))  + scale_color_manual(values=c(col_spec2, "Concentration" = "black")) + guides(col = F, size = F, linetype=F, shape = F)#breaks = c(0,24, 48, 72, 96, 120) #) #+ geom_hline(yintercept=0)
 
@@ -147,46 +164,35 @@ Distributions of species and metabolites (Figure S1)
 ```{r, echo=F, message=F, warning=F}
 spec_dists = ggplot(fake_spec, aes(x=value)) + geom_histogram(bins = 15) + facet_wrap(~Code, scales = "free", ncol = 5) + theme(strip.background = element_blank()) + xlab("Species abundance") + ylab("Sample count") + theme(axis.text = element_text(size=6), axis.title = element_text(size=9), strip.text = element_text(size = 9)) + scale_y_continuous(expand = c(0,0))
 
-fake_mets_melt[,niceLab2:=ifelse(grepl("meso-2;6", niceLab), "meso-2;6-diamino\nheptanedioate", as.character(niceLab))]
-met_dists = ggplot(fake_mets_melt[medium %in% path_key[!is.na(Class2),unique(medium)]], aes(x=value)) + geom_histogram(bins=15) + facet_wrap(~niceLab2, scales = "free", ncol=5)+ theme(strip.background = element_blank()) + xlab("Metabolite concentration") + ylab("Sample count") + theme(axis.text = element_text(size=5), axis.title = element_text(size=9), strip.text = element_text(size = 8))+ scale_y_continuous(expand = c(0,0))
-
-new_fig_s1 = plot_grid(spec_dists, met_dists, rel_heights = c(1,3.8), labels = c("A", "B"), nrow = 2)
-save_plot(new_fig_s1, file = "new_fig_s1_dists.png", base_width = 7.5, base_height= 11.5)
-
-```
-
-Metabolite plots
-
-```{r, echo=F, message=F, warning=F}
-fake_mets_melt[,Run:=gsub("_.*", "", Sample)]
-fake_mets_melt[,Run:=as.numeric(gsub("run", "", Run))]
-
-met_list = fake_mets_melt[,unique(niceLab)]
-met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), as.character(niceLab)]
-fake_mets_melt[,niceLab:=factor(niceLab, levels = met_order)]
-
 met_list_sub3 = c("putrescine", "tetradecanoate", "uracil", "acetate", "succinate")
 
 fake_mets_melt[,axisLabel:=ifelse(Run==3 & niceLab=="acetate", "*", Run)]
 fake_mets_melt[,axisLabel:=factor(axisLabel, levels = c(1:2, "*", 3:max(Run)))]
 fake_mets_melt[,niceLab2:=niceLab]
 fake_mets_melt[,niceLab2:=factor(niceLab2, levels = met_list_sub3)]
-fake_mets_melt[,mediaMet:=ifelse(medium %in% media[,medium],1,0)]
+fake_mets_melt[,mediaMet:=ifelse(compound %in% media[,medium],1,0)]
+fake_mets_melt[,niceLab3:=ifelse(grepl("meso-2;6", niceLab), "meso-2;6-diamino\nheptanedioate", as.character(niceLab))]
+
+met_dists = ggplot(fake_mets_melt[compound %in% path_key[!is.na(Class2),unique(medium)]], aes(x=value)) + geom_histogram(bins=15) + facet_wrap(~niceLab3, scales = "free", ncol=5)+ theme(strip.background = element_blank()) + xlab("Metabolite concentration") + ylab("Sample count") + theme(axis.text = element_text(size=5), axis.title = element_text(size=9), strip.text = element_text(size = 8))+ scale_y_continuous(expand = c(0,0))
+
+new_fig_s1 = plot_grid(spec_dists, met_dists, rel_heights = c(1,3.8), labels = c("A", "B"), nrow = 2)
+save_plot(new_fig_s1, file = "new_fig_s1_dists.png", base_width = 7.5, base_height= 11.5)
 
 ```
+
 
 Get contributions, general statistics about them
 
 ```{r, echo=F, message=F, warning=F}
 
-all_met_fluxes_final1 = fread("allMetFluxesFinalMain.txt")
+all_met_fluxes_final1 = fread(all_fluxes_file)
 all_met_fluxes_final1[,niceLab:=factor(niceLab, levels = met_order)]
 
 shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key)
 shap_contribs1[,niceLab:=factor(tolower(niceLab), levels=met_order)]
 
 
-met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,medium)]
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
 setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
 
 var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
@@ -202,7 +208,7 @@ shap_contribs = merge(shap_contribs, path_key, by.x = c("niceLab", "compound"), 
 all_met_fluxes_final = all_met_fluxes_final1[niceLab %in% shap_contribs[,unique(niceLab)]]
 
 shap_contribs[,mediaMet:=ifelse(compound %in% media[,medium], 1, 0)]
-shap_contribs = merge(shap_contribs, met_summary, by.x = c("compound","niceLab"), by.y = c("medium","niceLab"), all.x=T, all.y=F)
+shap_contribs = merge(shap_contribs, met_summary, by = c("compound","niceLab"), all.x=T, all.y=F)
 
 mean_flux= all_met_fluxes_final1[,list(mean(cumulFlux), var(cumulFlux)), by=list(niceLab,Species)]
 setnames(mean_flux, c("V1","V2"), c("meanFlux", "varFlux"))
@@ -388,30 +394,29 @@ num_shared_contrib_mets[,wilcox.test(value[Class2.x==Class2.y], value[Class2.x !
 num_shared_contrib_mets[,fisher.test(value > 0, Class2.x==Class2.y)]
 num_shared_contrib_mets[,prop.table(table(value > 0, Class2.x==Class2.y), 1)]
 
-#load(paste0(datadir, "TenSpecVary_relAbund_chemostat_fixRevRxns_mimosa_pieces.rda"))
 # edge_list_w_rev = emm_to_edge_list(mimosa_pieces_revFix[[7]])
 # write.table(edge_list_w_rev, file = "edge_list_revAGORA.txt", quote=F, row.names=F, sep = "\t")
-edge_list_w_rev = fread("edge_list_revAGORA.txt")
-edge_list_w_rev[,Reac:=gsub("[e]", "[env]", Reac, fixed = T)]
-edge_list_w_rev[,Prod:=gsub("[e]", "[env]", Prod, fixed = T)]
-currency_mets = edge_list_w_rev[,length(unique(KO)), by=Reac]
-currency_mets = merge(currency_mets, edge_list_w_rev[,length(unique(KO)), by=Prod], by.x = "Reac", by.y = "Prod", all = T)
-
-num_shared_contrib_mets[,Dist:=sapply(1:nrow(num_shared_contrib_mets), function(x){ return(num_shared_contrib_mets[x, get_net_dist(medium.x, medium.y, edge_list_w_rev)])})] 
-num_shared_contrib_mets[,cor.test(value, Dist, method="spearman")]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,cor.test(value, Dist, method="spearman")]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets, wilcox.test(value[Dist < 3], value[Dist >= 3])]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,wilcox.test(Dist[value==0], Dist[value !=0])]
-num_shared_contrib_mets[,wilcox.test(Dist[value==0], Dist[value !=0])]
+# edge_list_w_rev = fread("edge_list_revAGORA.txt")
+# edge_list_w_rev[,Reac:=gsub("[e]", "[env]", Reac, fixed = T)]
+# edge_list_w_rev[,Prod:=gsub("[e]", "[env]", Prod, fixed = T)]
+# currency_mets = edge_list_w_rev[,length(unique(KO)), by=Reac]
+# currency_mets = merge(currency_mets, edge_list_w_rev[,length(unique(KO)), by=Prod], by.x = "Reac", by.y = "Prod", all = T)
+# 
+# num_shared_contrib_mets[,Dist:=sapply(1:nrow(num_shared_contrib_mets), function(x){ return(num_shared_contrib_mets[x, get_net_dist(medium.x, medium.y, edge_list_w_rev)])})] 
+# num_shared_contrib_mets[,cor.test(value, Dist, method="spearman")]
+# num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,cor.test(value, Dist, method="spearman")]
+# num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets, wilcox.test(value[Dist < 3], value[Dist >= 3])]
+# num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,wilcox.test(Dist[value==0], Dist[value !=0])]
+# num_shared_contrib_mets[,wilcox.test(Dist[value==0], Dist[value !=0])]
 
 num_shared_contrib_mets[,mean(valueMag), by=ifelse(Class2.x==Class2.y,1,0)]
 num_shared_contrib_mets[,median(valueMag), by=ifelse(Class2.x==Class2.y,1,0)]
 num_shared_contrib_mets[,wilcox.test(valueMag[Class2.x==Class2.y], valueMag[Class2.x != Class2.y])]
 num_shared_contrib_mets[,fisher.test(valueMag > 0, Class2.x==Class2.y)]
 num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,cor.test(valueMag, Dist, method="spearman")]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets, wilcox.test(valueMag[Dist < 3], valueMag[Dist >= 3])]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,median(Dist), by=value==0]
-num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,mean(value), by=Dist > 1]
+#num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets, wilcox.test(valueMag[Dist < 3], valueMag[Dist >= 3])]
+# num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,median(Dist), by=value==0]
+# num_shared_contrib_mets[!medium.x %in% currency_mets & !medium.y %in% currency_mets,mean(value), by=Dist > 1]
 
 
 num_shared_contribs = data.table(melt(sapply(spec_codes[1:10, Species], function(x){
@@ -434,19 +439,19 @@ num_shared_contribs[,wilcox.test(valueMag[Phylum.x==Phylum.y], valueMag[Phylum.x
 #Do species with more compounds in their metabolic networks contribute to more metabolites?
 contribs_spec = shap_contribs[,list(sum(BinaryContribPos), sum(BinaryContribMag)), by=Code.x]
 
-comps_per_spec = data.table(spec_codes[1:10], NumMets = sapply(mimosa_pieces_revFix[[6]], function(x){
-  impacted_mets = apply(x[,2:ncol(x),with=F], 1, function(x){ length(x[x!=0])}) #Should be all of them
-  return(length(impacted_mets[impacted_mets !=0]))
-}), NumRxns = sapply(mimosa_pieces_revFix[[6]], function(x){
-  impacted_mets = apply(x[,2:ncol(x),with=F], 2, function(x){ length(x[x!=0])}) #Should be all of them
-  return(length(impacted_mets[impacted_mets !=0]))
-})
-)
-contribs_spec = merge(contribs_spec, comps_per_spec, by.x = "Code.x", by.y = "Code")
-contribs_spec[,cor.test(NumMets, V1, method="spearman")]
-contribs_spec[,cor.test(NumRxns, V1, method="spearman")]
-contribs_spec[,cor.test(NumMets, V2, method="spearman")]
-contribs_spec[,cor.test(NumRxns, V2, method="spearman")]
+# comps_per_spec = data.table(spec_codes[1:10], NumMets = sapply(mimosa_pieces_revFix[[6]], function(x){
+#   impacted_mets = apply(x[,2:ncol(x),with=F], 1, function(x){ length(x[x!=0])}) #Should be all of them
+#   return(length(impacted_mets[impacted_mets !=0]))
+# }), NumRxns = sapply(mimosa_pieces_revFix[[6]], function(x){
+#   impacted_mets = apply(x[,2:ncol(x),with=F], 2, function(x){ length(x[x!=0])}) #Should be all of them
+#   return(length(impacted_mets[impacted_mets !=0]))
+# })
+# )
+# contribs_spec = merge(contribs_spec, comps_per_spec, by.x = "Code.x", by.y = "Code")
+# contribs_spec[,cor.test(NumMets, V1, method="spearman")]
+# contribs_spec[,cor.test(NumRxns, V1, method="spearman")]
+# contribs_spec[,cor.test(NumMets, V2, method="spearman")]
+# contribs_spec[,cor.test(NumRxns, V2, method="spearman")]
 
 contribs_mets = shap_contribs[,list(sum(BinaryContribPos), sum(BinaryContribMag)), by=list(Metabolite, compound, niceLab,Mean.x, TrueVar, mediaMet)]
 contribs_mets[,CoefVar:=TrueVar/Mean.x]
@@ -483,7 +488,6 @@ save_plot(fig_s5, file = "FigureS5_contribProperties.png", base_width = 8, base_
 Correlation Plots (Figure 3)
 
 ```{r, echo=F, message=F, warning=F}
-setnames(fake_mets_melt, "medium", "compound")
 fake_mets_melt_good = fake_mets_melt[niceLab %in% shap_contribs[,niceLab]]
 
 spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt = fake_mets_melt_good, shap_contribs, outcome_var = "BinaryContribPos")
@@ -645,6 +649,10 @@ counts_by_spec_wide[,cor(V1, `False positive`)]
 counts_by_spec_wide[,cor(V2, `False positive`)]
 
 species_counts[,cor.test(FalsePos/FalsePosPossible, abs(Corr), method = "spearman")]
+species_pvals = rbindlist(lapply(spec_codes[1:10,SpeciesName], function(x){
+  foo = merge(fake_spec[SpeciesName==x], fake_spec[SpeciesName !=x], by=c("SimRun", "Sample"))
+  return(foo[,cor.test(value.x, value.y)$p.value, by=list(SpeciesName.x, SpeciesName.y)])
+}))
 setnames(species_pvals, c("ContribSpecies", "SpeciesName", "PvalueCorr"))
 species_counts = merge(species_counts, species_pvals, by = c("ContribSpecies", "SpeciesName"), all.x=T)
 species_counts[,wilcox.test(FalsePos/FalsePosPossible[PvalueCorr < 0.01], FalsePos/FalsePosPossible[PvalueCorr > 0.0001])]
@@ -935,16 +943,18 @@ save_plot(keyplayer_fig, file = "FigureS_keyPlayers.png", base_width = 9, base_h
 Compare with Shapley values (Figure S2)
 
 ```{r, echo=F, message=F, warning=F}
+shap_iters_file = "AllCumulMetVars.txt"
+mean_shap_file = "AllShapContribs.txt"
 
 ##Generated by runShapleyAnalysis function
-real_shap2 = fread("~/GS_server/PROJECTS/MORE_METABOLOMICS_CN/RESULTS/shapValAGORA/AllShapContribs3.txt")
+real_shap2 = fread(mean_shap_file)
 setnames(real_shap2, "medium", "compound")
 shap_contribs1[,Code:=Code.x]
 
 shap_compare = merge(shap_contribs1[,list(compound, Code, TrueVar, V1, VarShare)], real_shap, by=c("compound", "Code"))
 compare_plot1 = ggplot(shap_compare[compound %in% shap_contribs[,unique(compound)]], aes(x=abs(V1), y = abs(value))) + geom_point() + scale_x_log10() + scale_y_log10() + xlab("Analytical") + ylab("Permutation-based") + theme(axis.text = element_text(size=7), axis.title = element_text(size=11))
 
-all_shap_iters = fread("~/GS_server/PROJECTS/MORE_METABOLOMICS_CN/RESULTS/shapValAGORA/AllCumulMetVars.txt")
+all_shap_iters = fread(shap_iters_file)
 setnames(all_shap_iters, "medium", "compound")
 all_mses = data.table()
 

@@ -33,7 +33,7 @@ getContributions = function(met_fluxes_final, spec_codes, kegg_translate, path_k
   #Merge extra info
   shap_contribs = merge(var_shares, kegg_translate, by.x="compound", by.y = "medium", all.x=T)
   shap_contribs[,niceLab:=gsub("_e0","",Metabolite)]
-  shap_contribs = shap_contribs[Metabolite %in% all_mets[,Metabolite]]
+  shap_contribs = shap_contribs[Metabolite %in% kegg_translate[,Metabolite]]
   met_order = unique(shap_contribs[,list(Metabolite, niceLab, TrueVar)])[order(TrueVar, decreasing=T), niceLab]
   shap_contribs[,niceLab:=factor(niceLab, levels = met_order)]
   # if("KEGG" %in% names(shap_contribs)){
@@ -45,15 +45,21 @@ getContributions = function(met_fluxes_final, spec_codes, kegg_translate, path_k
 }
 
 ############### Calculate correlations and merge with contributions
-get_correlation_contrib_comparison = function(fake_spec, fake_mets_melt, shap_contribs, outcome_var = "BinaryContribPos", contrib_threshold = 0.1){
-  if(!("PosVarShare" %in% names(shap_contribs) & "VarShareMagnitude" %in% names(shap_contribs))){
-    shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=niceLab]
-    shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=niceLab]
+get_correlation_contrib_comparison = function(fake_spec, fake_mets_melt, shap_contribs, outcome_var = "BinaryContribPos", contrib_threshold = 0.1, spec_codes = make_spec_codes()[1:10]){
+  if(!("Sample" %in% names(fake_spec))){
+    fake_spec[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
   }
-  bad_mets = fake_mets_melt[,var(value),by=Metabolite][V1==0|is.na(V1),Metabolite]
-  spec_met_corrs = basic_correlation_matrix(fake_spec[,list(Species,Sample,value)], fake_mets_melt[!Metabolite %in% bad_mets,list( Metabolite,Sample, value)], method="spearman")
+  if(!("Sample" %in% names(fake_mets_melt))){
+    fake_mets_melt[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
+  }
+  if(!("PosVarShare" %in% names(shap_contribs) & "VarShareMagnitude" %in% names(shap_contribs))){
+    shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=compound]
+    shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=compound]
+  }
+  bad_mets = fake_mets_melt[,var(value),by=compound][V1==0|is.na(V1),compound]
+  spec_met_corrs = basic_correlation_matrix(fake_spec[,list(Species,Sample,value)], fake_mets_melt[!compound %in% bad_mets,list( compound,Sample, value)], method="spearman")
   
-  spec_met_corrs = merge(shap_contribs[!Metabolite %in% bad_mets], spec_met_corrs, by = c("Species", "Metabolite"), all = T)
+  spec_met_corrs = merge(shap_contribs[!compound %in% bad_mets], spec_met_corrs, by = c("Species", "compound"), all = T)
   spec_met_corrs = spec_met_corrs[!Species %in% c("Inflow", "Outflow")]
   
   spec_met_corrs[,CorTransform:=log((1+estimate)/(1-estimate))/2]
@@ -443,7 +449,6 @@ fix_rev_rxns = function(ten_spec_vary, old_mimosa_pieces){
     return(foo)
   })
   
-  
   for(j in 1:nrow(new_rxns)){
     #if old reaction is still there, save info
     if(new_rxns[j,Rxn] %in% names(mimosa_pieces[[7]])){
@@ -508,13 +513,16 @@ fix_rev_rxns = function(ten_spec_vary, old_mimosa_pieces){
   
   #################### Run core MIMOSA analysis on simulation dataset
   #gene_type either species, totalFlux, cumulFlux, or genes
-run_all_metabolites_FBA = function(run_prefix, fake_spec = "", fake_genes = "", fake_mets, gene_type = "species", mimosa_pieces, spec_codes, degree_filter = 40, cor_method = "spearman", correction = "fdr", nperm = 10000, nonzero_filter = 4, all_fluxes = ""){
-    
+run_all_metabolites_FBA = function(run_prefix, fake_spec = "", fake_genes = "", fake_mets, gene_type = "species", species_rxns, rxn_mets, mimosa_pieces = "", spec_codes, degree_filter = 40, cor_method = "spearman", correction = "fdr", nperm = 10000, nonzero_filter = 4, all_fluxes = "", kegg_translate = ""){
     if(gene_type == "species"){
       if(identical(fake_spec, "")) stop("Include species to use for gene abundances")
       #Using only nonrev rxns for consistency/safety
-      specRxns = mimosa_pieces[[3]][,lapply(.SD, as.numeric), .SDcols = spec_codes[,Code]]
-      specRxns[,RxnID:=mimosa_pieces[[3]][,RxnID]]
+      if(mimosa_pieces != ""){
+        specRxns = mimosa_pieces[[3]][,lapply(.SD, as.numeric), .SDcols = spec_codes[,Code]]
+        specRxns[,RxnID:=mimosa_pieces[[3]][,RxnID]]
+      } else {
+        specRxns = species_rxns
+      }
       fake_rxn_abunds = FBA_picrust(fake_spec, specRxns, spec_codes)
     } else if(gene_type == "totalFlux" | gene_type == "cumulFlux"){
       if(identical(all_fluxes, "")) stop("Include all_fluxes to use reaction fluxes")
@@ -526,10 +534,13 @@ run_all_metabolites_FBA = function(run_prefix, fake_spec = "", fake_genes = "", 
       fake_rxn_abunds = fake_genes
     }
     
-    #Exclude rev reactions from S mat
-    all_S_mats = mimosa_pieces[[2]]
+    if(mimosa_pieces != ""){
+      #Exclude rev reactions from S mat
+      all_S_mats = mimosa_pieces[[2]]
+    } else {
+      all_S_mats = emm
+    }
     all_comps = all_S_mats[,Compound]
-    
     subjects = intersect(names(fake_rxn_abunds), names(fake_mets))
     if(length(subjects) < 2) stop("Sample names not consistent between genes and metabolites")
     
@@ -537,16 +548,20 @@ run_all_metabolites_FBA = function(run_prefix, fake_spec = "", fake_genes = "", 
     row.names(emm) = gsub("[e]", "[env]", all_comps, fixed=T)
     norm_kos = fake_rxn_abunds
     emm = emm[,names(emm) %in% norm_kos[,KO]]
-    
     cmp_mat = get_cmp_scores(emm, norm_kos)
     
     #get mets
-    if(!"medium" %in% names(fake_mets)){
+    if(!"medium" %in% names(fake_mets) & !"compound" %in% names(fake_mets)){
       fake_mets = merge(fake_mets, kegg_translate, by="Metabolite", all.x=T, all.y=F)
     }
-    metIDs = fake_mets[,medium]
+    if("compound" %in% names(fake_mets)){
+      metIDs = fake_mets[,compound] 
+      met_name = "compound"
+    } else {
+      metIDs = fake_mets[,medium]
+      met_name = "medium"
+    }
     shared_mets = metIDs[metIDs %in% row.names(emm)] 
-    setkey(fake_mets, medium)
     setkey(cmp_mat, compound)
     all_comparisons = vector("list",length(shared_mets))
     
@@ -559,7 +574,7 @@ run_all_metabolites_FBA = function(run_prefix, fake_spec = "", fake_genes = "", 
         all_comparisons[[j]] = NA
       }else{
         met_mat = make_pairwise_met_matrix(shared_mets[j], cmp_mat[,c(good_subs, "compound"),with=F])
-        metabol_mat = make_pairwise_met_matrix(shared_mets[j], fake_mets[,c(good_subs,"medium"),with=F])
+        metabol_mat = make_pairwise_met_matrix(shared_mets[j], fake_mets[,c(good_subs,met_name),with=F])
         test = mantel_2sided(met_mat,metabol_mat,method=cor_method,permutations = nperm, direction = "pos")
         test_n = mantel_2sided(met_mat,metabol_mat,method=cor_method,permutations = nperm, direction = "neg")
         all_comparisons[[j]] = list(ID = shared_mets[j], PRMT = met_mat, Mets = metabol_mat, Mantel = list(test,test_n))
@@ -772,7 +787,7 @@ make_contribs_plot = function(metLab, met_sub_dat){
 
 basic_correlation_matrix = function(fake_spec, fake_mets, method="pearson"){
   all_dats = merge(fake_spec, fake_mets, by = "Sample", allow.cartesian = T) #big table
-  cor_results = all_dats[,cor.test(value.x, value.y, method = method, use = "complete.obs")[c("estimate", "p.value")], by = list(Species, Metabolite)]
+  cor_results = all_dats[,cor.test(value.x, value.y, method = method, use = "complete.obs")[c("estimate", "p.value")], by = list(Species, compound)]
   return(cor_results)
 }
 
@@ -793,6 +808,28 @@ get_AUC = function(ROC_dat){
   }), na.rm=T))
 }
 
+############## ROC calculation
+calculate_roc <- function(df, cost_of_fp, cost_of_fn, n=100) {
+  tpr <- function(df, threshold) {
+    sum(df$pred >= threshold & df$survived == 1) / sum(df$survived == 1)
+  }
+  
+  fpr <- function(df, threshold) {
+    sum(df$pred >= threshold & df$survived == 0) / sum(df$survived == 0)
+  }
+  
+  cost <- function(df, threshold, cost_of_fp, cost_of_fn) {
+    sum(df$pred >= threshold & df$survived == 0) * cost_of_fp + 
+      sum(df$pred < threshold & df$survived == 1) * cost_of_fn
+  }
+  
+  roc <- data.frame(threshold = seq(0,1,length.out=n), tpr=NA, fpr=NA)
+  roc$tpr <- sapply(roc$threshold, function(th) tpr(df, th))
+  roc$fpr <- sapply(roc$threshold, function(th) fpr(df, th))
+  roc$cost <- sapply(roc$threshold, function(th) cost(df, th, cost_of_fp, cost_of_fn))
+  
+  return(roc)
+}
 
 ##### Process FBA simulation output, fluxes is whether output_details was true for the simulations
 processFBAOutput = function(matFile, fluxes = F, all_rxns_by_spec = NULL, agora = F){ 
@@ -985,7 +1022,7 @@ getCorrectTotalRxnFluxes = function(fluxes, species, growthRates, d = 0.0472, t 
 
 ########## Get species table
 make_spec_codes = function(){
-  spec_codes = data.table(Species = c("ErectaleAGORA", "CaerofaciensAGORA", "DpigerAGORA", "BhydrogenotrophicaAGORA", "CsymbiosumAGORA", "MformatexigensAGORA", "EcoliAGORA", "BovatusAGORA", "BthetaiotaomicronAGORA", "BcaccaeAGORA"), Code = c("Er", "Ca", "Dp", "Bh", "Cs", "Mf", "Ec", "Bo", "Bt", "Bc"), SpeciesName = c("Eubacterium rectale", "Collinsella aerofaciens", "Desulfovibrio piger", "Blautia hydrogenotrophica", "Clostridium symbiosum", "Marvinbryantia formatexigens", "Escherichia coli", "Bacteroides ovatus", "Bacteroides thetaiotaomicron", "Bacteroides caccae"), Class = c("Clostridia", "Actinobacteria", "Deltaproteobacteria", "Clostridia", "Clostridia","Clostridia", "Gammaproteobacteria", "Bacteroidia", "Bacteroidia", "Bacteroidia"), Phylum = c("Firmicutes", "Actinobacteria", "Proteobacteria", "Firmicutes", "Firmicutes", "Firmicutes", "Proteobacteria", "Bacteroidetes", "Bacteroidetes", "Bacteroidetes"))
+  spec_codes = data.table(Species = c("ErectaleAGORA", "CaerofaciensAGORA", "DpigerAGORA", "BhydrogenotrophicaAGORA", "CsymbiosumAGORA", "MformatexigensAGORA", "EcoliAGORA", "BovatusAGORA", "BthetaiotaomicronAGORA", "BcaccaeAGORA"), Code = c("Er", "Ca", "Dp", "Bh", "Cs", "Mf", "Ec", "Bo", "Bt", "Bc"), SpeciesName = c("Eubacterium rectale", "Collinsella aerofaciens", "Desulfovibrio piger", "Blautia hydrogenotrophica", "Clostridium symbiosum", "Marvinbryantia formatexigens", "Escherichia coli", "Bacteroides ovatus", "Bacteroides thetaiotaomicron", "Bacteroides caccae"), Class = c("Clostridia", "Actinobacteria", "Deltaproteobacteria", "Clostridia", "Clostridia","Clostridia", "Gammaproteobacteria", "Bacteroidia", "Bacteroidia", "Bacteroidia"), Phylum = c("Firmicutes", "Actinobacteria", "Proteobacteria", "Firmicutes", "Firmicutes", "Firmicutes", "Proteobacteria", "Bacteroidetes", "Bacteroidetes", "Bacteroidetes"), Description = c("Eubacterium rectale ATCC 33656", "Collinsella aerofaciens ATCC 25986", "Desulfovibrio piger ATCC 29098", "Blautia hydrogenotrophica DSM 10507", "Clostridium symbiosum WAL-14163", "Marvinbryantia formatexigens I-52 DSM 14469", "Escherichia coli K-12 MG1655", "Bacteroides ovatus ATCC 8483", "Bacteroides thetaiotaomicron VPI-5482", "Bacteroides caccae ATCC 43185"))
   spec_codes = rbind(spec_codes, data.table(Species = c("Inflow", "Outflow"), Code = c("in", "out")), fill = T)
   spec_codes[is.na(SpeciesName), SpeciesName:=Species]
   return(spec_codes)
@@ -1004,7 +1041,7 @@ fix_met_names = function(met_data, col_name = "Metabolite"){
   
 }
 
-####################### Build dataset with processed reaction IDs from multiple sets of simulations 
+####################### Build dataset with processed reaction IDs from multiple sets of simulations, must all share the same file name structure 
 process_FBA_runs = function(mod_path, results_path, file_id, dictionary, spec_codes, out_prefix){
   
   #Load models
@@ -1054,14 +1091,35 @@ process_FBA_runs = function(mod_path, results_path, file_id, dictionary, spec_co
     return(foo)
   }))
   
-  save(all_species, file = paste0(out_prefix, "_allSpecies.rda")
-  save(mimosa_pieces_revFix, file = paste0(out_prefix, "_mimosa_pieces.rda")
-  #save(ten_spec_vary_revFix, file = paste0(out_prefix, "_resultsList.rda")
-  save(all_fluxes, file = paste0(out_prefix, "_allFluxes.rda")
-  save(all_mets, file = paste0(out_prefix, "_allMets.rda")
-  save(growthRates, file = paste0(out_prefix, "_growthRates.rda")
-  save(mod2media, file = paste0(out_prefix, "_mod2media.rda")
+  save(all_species, file = paste0(out_prefix, "_allSpecies.rda"))
+  save(mimosa_pieces_revFix, file = paste0(out_prefix, "_mimosa_pieces.rda"))
+  #save(ten_spec_vary_revFix, file = paste0(out_prefix, "_resultsList.rda"))
+  save(all_fluxes, file = paste0(out_prefix, "_allFluxes.rda"))
+  save(all_mets, file = paste0(out_prefix, "_allMets.rda"))
+  save(growthRates, file = paste0(out_prefix, "_growthRates.rda"))
+  save(mod2media, file = paste0(out_prefix, "_mod2media.rda"))
 }
+
+########### Add species reaction abundance to flux table
+get_specRxn_flux_data = function(run_data, specRxns, spec_codes){
+  spec_data = run_data$species
+  spec_data = dcast.data.table(spec_data, Species~TimePoint, value.var = "value", fun.aggregate = sum)
+  #Get gene abundances
+  gene_data_by_spec = rbindlist(lapply(1:nrow(spec_data), function(x){
+    spec_gene_data = melt(FBA_picrust(spec_data[Species==spec_codes[x,Species]], specRxns, spec_codes), id.var = "KO", variable.name = "TimePoint", value.name = "specRxnAbund")
+    spec_gene_data[,Species:=spec_codes[x,Species]]
+    return(spec_gene_data[specRxnAbund !=0])
+  }))
+  setnames(gene_data_by_spec, "KO", "Rxn")
+  gene_data_by_spec[,TimePoint:=as.numeric(TimePoint)]
+  run_data$fluxes = merge(run_data$fluxes, gene_data_by_spec, by = c("Species","Rxn","TimePoint"), all = T)
+  run_data$fluxes = run_data$fluxes[Rxn !="biomass0"& !grepl("EX_", Rxn)] # 
+  run_data$fluxes[TimePoint==1,value:=0]
+  run_data$fluxes[,totalFlux:=value*specRxnAbund]
+  run_data$fluxes[order(TimePoint),cumulFlux:=cumsum(totalFlux),by=list(Species,Rxn)] #This is a placeholder (calculated correctly later)
+  return(run_data)
+}
+
 
 ############### Convert community stoichiometric matrix (e.g. MIMOSA) to edge list
 emm_to_edge_list = function(emm){ 
@@ -1107,6 +1165,23 @@ get_net_dist = function(c1, c2, allnet, currency_mets = data.table()){
   return(netdist)
 }
 
+################ Make media files with noisy quantities, write to same directory as original file
+make_media_vary = function(orig_media_file, data_dir, used_mets, nsamps = 61, sd_constants = c(0.5, 1, 2, 3, 4, 5, 8, 10)){
+  main_media = fread(paste0(data_dir, orig_media_file))
+  media_mets = main_media[,V1]
+  if(any(grepl("[e]", used_mets, fixed = T))){
+    used_mets = used_mets[gsub("[env]", "[e]", Metabolite, fixed = T)]
+  }
+  media_mets = media_mets[media_mets %in% used_mets]
+  
+  for(k in 1:length(sd_constants)){
+    for(j in 1:nsamps){
+      media2 = copy(main_media)
+      media2[, V3:=sapply(V3, function(x){ return(rnorm(1, mean = x, sd = x*sd_constants[k]/100))})]
+      write.table(media2, file = paste0(data_dir, "FaithMediaAGORA_", sd_constants[k], "_", j, ".csv"), quote=F, row.names = F, col.names = F, sep = ",")
+    }
+  }
+}
 
 ################### Generate metabolite categories
 make_path_key = function(met_key){

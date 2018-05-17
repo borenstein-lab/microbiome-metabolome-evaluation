@@ -20,15 +20,25 @@ homedir = "~/Documents/GS_server/PROJECTS/MORE_METABOLOMICS_CN/"
 datadir = paste0(homedir, "RESULTS/AGORA/")
 source("FBA_functions.R")
 
-##Reference information: Media, species IDs & categories, metabolite IDs & categories
+#Data Files
 media_file = "FaithMedia_AGORA_F_final.csv"
+dictionary_file = "Dictionary_AGORA_complete.csv"
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+spec_file = "allSpeciesFinalMain.txt"
+met_file = "allMetabolitesFinalMain.txt"
+all_fluxes_file = "allMetFluxesFinalMain.txt"
+env_spec_file = "allSpeciesEnvFluc.txt"
+env_met_file = "allMetabolitesEnvFluc.txt"
+env_fluxes_file = "allMetFluxesEnvFluc.txt"
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
 media = fread(media_file)
 media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
 setnames(media, "V1", "medium")
 
 spec_codes = make_spec_codes()
 
-dictionary = fread("Dictionary_AGORA_complete.csv")
+dictionary = fread(dictionary_file)
 dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
 dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
 dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
@@ -41,7 +51,7 @@ setnames(dictionary, "Primary", "Metabolite")
 kegg_translate = dictionary[,list(Metabolite, medium)]
 dictionary[,niceLab:=tolower(Metabolite)]
 
-path_key = fread("hmdb_brite_metabolite_classes.txt")
+path_key = fread(met_key_file)
 path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
 path_key[,Metabolite:=NULL]
 
@@ -54,28 +64,19 @@ names(col_spec2) = c(spec_codes[1:10][order(SpeciesName), SpeciesName], "Inflow"
 
 timePointFinal = 577
 
-all_species = fread("allSpeciesMain.txt")
-all_species[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
-all_species = merge(all_species, spec_codes, by = c("Species", "Code"), all.x=T, all.y=F)
-fake_spec = all_species[TimePoint==timePointFinal]
+fake_spec = fread(spec_file)
 fake_spec[,SampleID:=SimRun]
+fake_spec = merge(fake_spec, spec_codes, by = c("Species", "Code"))
 fake_spec[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
-all_mets = fread("allMetabolitesMain.txt")
-bad_mets1 = all_mets[,length(value[value !=0]),by=medium][V1==0,medium]
-all_mets = all_mets[!Metabolite %in% bad_mets1]
-all_mets[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[,Code], collapse=""), "_TP", TimePoint)]
 
-fake_mets = dcast(all_mets[TimePoint==timePointFinal], medium+Metabolite~Sample)
-fake_mets_melt = melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
-all_mets[,Time:=TimePoint/4]
-
-fake_mets_melt = merge(fake_mets_melt, path_key, by = "medium", all.x=T)
+fake_mets_melt = fread(met_file) #melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
+fake_mets_melt = merge(fake_mets_melt, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
 
 met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), niceLab]
-met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(Metabolite,medium)]
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
 setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
 
-all_met_fluxes_final1 = fread("allMetFluxesFinalMain.txt")
+all_met_fluxes_final1 = fread(all_fluxes_file)
 all_met_fluxes_final1[,niceLab:=factor(niceLab, levels = met_order)]
 
 shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key)
@@ -86,6 +87,12 @@ var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handl
 shap_contribs1[TrueVar > var_cutoff, unique(niceLab)]
 shap_contribs = shap_contribs1[TrueVar > var_cutoff]
 orig_mets = shap_contribs[,unique(compound)]
+shap_contribs[,noiseLevel:=0]
+shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
+shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
+shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+
 
 noiseLevels = c(0.02, 0.05, 0.1, 0.15, 0.2, 0)
 noiseLevels = c(0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.08, 0.1, 0)
@@ -97,59 +104,54 @@ spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt_go
 spec_met_corrs[,noiseLevel:=0]
 ```
 
-Get all contributions with correct classification
+Get species & metabolites with env fluctuations
 
 ```{r, echo=F, message=F, warning=F}
-#### Look at contribs
-shap_contribs[,noiseLevel:=0]
-shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
-shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
-shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
-shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+env_species = fread(env_spec_file)
+env_species[,SampleID:=SimRun]
+env_species = merge(env_species, spec_codes, by = c("Species", "Code"))
+env_species[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
+env_species[,noiseLevel:=noiseLevel/100]
 
+env_mets = fread(env_met_file)
+env_mets = merge(env_mets, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
+env_mets[,noiseLevel:=noiseLevel/100]
+
+env_met_fluxes = fread(env_fluxes_file)
+env_met_fluxes = merge(env_met_fluxes, path_key, by.x = "compound", by.y = "medium", all.x=T)
+env_met_fluxes[,niceLab:=factor(niceLab, levels = met_order)]
+env_met_fluxes[,noiseLevel:=noiseLevel/100]
+
+env_mets_good = env_mets[compound %in% orig_mets]
 all_shap_contribs = shap_contribs
+spec_met_corrs_all = spec_met_corrs
 
-for(j in 1:(length(noiseLevels)-1)){
-  shap_contribs = fread(paste0(datadir, "noisyMedia_AGORA577_nm_", noiseLevels[j]*100, "_contribs.txt"))
-  shap_contribs[,noiseLevel:=noiseLevels[j]]
-  shap_contribs = shap_contribs[TrueVar > var_cutoff]
-  shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
-  shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
-  shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
-  shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
-  all_shap_contribs = rbind(all_shap_contribs, shap_contribs, fill = T)
+for(j in noiseLevels[noiseLevels != 0]){
+  env_shap = getContributions(env_met_fluxes[noiseLevel==j], spec_codes[Code != "out"], kegg_translate, path_key)
+  env_shap[,niceLab:=factor(tolower(niceLab), levels=met_order)]
+  env_shap = env_shap[compound %in% orig_mets]
+  env_shap[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=niceLab]
+  env_shap[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=niceLab]
+  env_shap[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+  env_shap[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+  env_shap[,noiseLevel:=j]
+  all_shap_contribs = rbind(all_shap_contribs, env_shap, fill = T)
+  spec_met_corrs = get_correlation_contrib_comparison(env_species[noiseLevel==j], env_mets_good[noiseLevel==j], env_shap)[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs, noiseLevel)]
+  spec_met_corrs[,noiseLevel:=j]
+  spec_met_corrs = merge(spec_met_corrs, env_shap, by = c("Species", "compound", "noiseLevel"), all.x = T)
+  spec_met_corrs_all = rbind(spec_met_corrs_all, spec_met_corrs, fill = T)
 }
-all_shap_contribs[Metabolite=='L-lysinium(1+)', Metabolite:="L-lysine"]
-all_shap_contribs[,Metabolite:=gsub(" \\(.*\\)$","", Metabolite)]
-all_shap_contribs[,Metabolite:=gsub("\\(.*\\)$","", Metabolite)]
-all_shap_contribs[Metabolite=='L-argininium', Metabolite:="L-arginine"]
-all_shap_contribs[Metabolite=="proton", Metabolite:="H+"]
-all_shap_contribs[Metabolite=="hydrogenphosphate", Metabolite:="Orthophosphate"]
 
-all_shap_contribs[,niceLab:=tolower(Metabolite)]
 
-#other_mets = all_shap_contribs[!niceLab %in% met_order, unique(niceLab)]
 all_shap_contribs[,niceLab:=factor(niceLab, levels=met_order)]
 all_shap_contribs[,mediaMet:=ifelse(compound %in% media[,medium], 1, 0)]
+spec_met_corrs_all[,niceLab:=tolower(Metabolite)]
 
 ```
 
 Get spec-met correlation comparisons
 
 ```{r, echo=F, message=F, warning=F}
-spec_met_corrs = spec_met_corrs[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs, noiseLevel)]
-spec_met_corrs = merge(spec_met_corrs, all_shap_contribs[noiseLevel==0], by=c("Species", "compound", "noiseLevel"))
-
-spec_met_corrs_all = spec_met_corrs
-for(j in 1:(length(noiseLevels)-1)){
-  spec_met_corrs = fread(paste0(datadir, "noisyMedia_AGORA577_nm_", noiseLevels[j]*100, "_metCorrs.txt"))
-  spec_met_corrs = spec_met_corrs[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs)]
-  spec_met_corrs[,noiseLevel:=noiseLevels[j]]
-  spec_met_corrs = merge(spec_met_corrs, all_shap_contribs[noiseLevel==noiseLevels[j]], by = c("Species", "compound", "noiseLevel"), all.x = T)
-  #spec_met_corrs = getScaledContribs(spec_met_corrs)
-  spec_met_corrs_all = rbind(spec_met_corrs_all, spec_met_corrs, fill = T)
-}
-spec_met_corrs_all[,niceLab:=tolower(Metabolite)]
 spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==1, "True positive", "True negative")]
 spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==0, "False positive", Outcome_v2)]
 spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value > 0.01 & BinaryContribPos==1, "False negative", Outcome_v2)]

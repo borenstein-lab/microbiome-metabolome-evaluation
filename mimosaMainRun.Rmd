@@ -1,0 +1,298 @@
+---
+title: "MIMOSA results on simulations"
+output: html_notebook
+---
+
+Run MIMOSA on main dataset
+
+```{r, echo=F, message=F, warning=F}
+options(stringsAsFactors = F, scipen = 20)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(R.matlab)
+library(RColorBrewer)
+library(mimosa)
+library(Rcpp)
+library(pROC)
+
+homedir = "~/Documents/GS_server/PROJECTS/MORE_METABOLOMICS_CN/"
+datadir = paste0(homedir, "RESULTS/AGORA/")
+source("FBA_functions.R")
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
+#Data Files
+media_file = "FaithMedia_AGORA_F_final.csv"
+dictionary_file = "Dictionary_AGORA_complete.csv"
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+spec_file = "allSpeciesFinalMain.txt"
+met_file = "allMetabolitesFinalMain.txt"
+all_fluxes_file = "allMetFluxesFinalMain.txt"
+mimosa_specRxns_file = "MIMOSA_speciesReactions.txt"
+mimosa_emm_file = "MIMOSA_reactionsMetabolites.txt"
+  
+#Path to KEGG gene and reaction linking files (see MIMOSA documentation)
+kegg_dir = "~/Genome_Sciences/KEGG_files/KEGG_2018/" 
+##KEGG genome annotation files
+genome_list_file = paste0(homedir, "DATA/FBA_IMG_allSpecGenomes.txt")
+genome_path = paste0(homedir, "DATA/IMG_Genome_Data/")
+
+##Set up
+media = fread(media_file)
+media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
+setnames(media, "V1", "medium")
+
+spec_codes = make_spec_codes()
+
+dictionary = fread(dictionary_file)
+dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
+dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
+dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
+dictionary[,Primary:=gsub("\\(.*\\)$","", Primary)]
+dictionary[Primary=='L-argininium', Primary:="L-arginine"]
+dictionary[Primary=="proton", Primary:="H+"]
+dictionary[Primary=="hydrogenphosphate", Primary:="Orthophosphate"]
+dictionary[grepl("Amylopectin", Primary), Primary:="Amylopectin"]
+setnames(dictionary, "Primary", "Metabolite")
+kegg_translate = dictionary[,list(Metabolite, medium)]
+dictionary[,niceLab:=tolower(Metabolite)]
+
+path_key = fread(met_key_file)
+path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
+path_key[,Metabolite:=NULL]
+
+##Color scale for plotting species
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_spec = c(getPalette(10), "grey50", "grey20")
+names(col_spec) = c(spec_codes[1:10][order(SpeciesName), Code], "in", "out")
+col_spec2 = col_spec
+names(col_spec2) = c(spec_codes[1:10][order(SpeciesName), SpeciesName], "Inflow", "Outflow")
+
+timePointFinal = 577
+
+fake_spec = fread(spec_file)
+fake_spec[,SampleID:=SimRun]
+fake_spec = merge(fake_spec, spec_codes, by = c("Species", "Code"))
+fake_spec[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
+fake_spec[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[1:10,Code], collapse=""), "_TP", TimePoint)]
+
+fake_mets_melt = fread(met_file) #melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
+fake_mets_melt = merge(fake_mets_melt, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
+
+met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), niceLab]
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+
+all_met_fluxes_final1 = fread(all_fluxes_file)
+all_met_fluxes_final1[,niceLab:=factor(niceLab, levels = met_order)]
+
+shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key)
+shap_contribs1[,niceLab:=factor(tolower(niceLab), levels=met_order)]
+
+var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+
+shap_contribs1[TrueVar > var_cutoff, unique(niceLab)]
+shap_contribs = shap_contribs1[TrueVar > var_cutoff]
+orig_mets = shap_contribs[,unique(compound)]
+
+contrib_threshold_pos = 0.1
+contrib_threshold_mag = 0.2
+
+fake_mets_melt_good = fake_mets_melt[niceLab %in% shap_contribs[,niceLab]]
+spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt_good, shap_contribs)
+
+```
+
+Run core MIMOSA analysis
+
+```{r, echo=F, message=F, warning=F}
+
+fake_spec2 = dcast(fake_spec, Species~Sample, value.var="value")
+
+#KEGG Genomes
+genomes = process_downloaded_img_data(spec_codes[1:10], genome_list_file, genome_path, pan_genome = T)
+genomes = merge(genomes, spec_codes, by = "SpeciesName", all.x=T, all.y = F)
+setnames(genomes, "KO", "RxnID")
+
+specRxns = fread(mimosa_specRxns_file)
+rxn_ids = specRxns[,RxnID]
+specRxns = specRxns[,lapply(.SD, as.numeric), .SDcols=names(specRxns)[1:10]]
+specRxns[,RxnID:=rxn_ids]
+fake_rxn_abunds = FBA_picrust(fake_spec2, specRxns, spec_codes[1:10])
+
+genomes_specRxns = dcast(genomes, RxnID~Code, value.var = "CopyNum", fun.aggregate = sum)
+genomes_specRxns[is.na(genomes_specRxns)] = 0
+fake_spec_rel = data.table(Species = fake_spec2[,Species], fake_spec2[,lapply(.SD, function(x){ x/sum(x)}), .SDcols = names(fake_spec2)[names(fake_spec2) != "Species"]])
+kegg_rxn_abunds = FBA_picrust(fake_spec_rel, genomes_specRxns, spec_codes[1:10])
+
+emm = fread(mimosa_emm_file)
+emm[,Compound:=gsub("[e]", "[env]", Compound, fixed = T)]
+edge_list = emm_to_edge_list(emm)
+edge_list[,Reac:=gsub("[e]", "[env]", Reac, fixed = T)]
+edge_list[,Prod:=gsub("[e]", "[env]", Prod, fixed = T)]
+#emm = emm[,names(emm) %in% c("Compound", reversible_rxns[Rev.V1==0, unique(Rxn)]), with=F]
+
+all_gene_dats = list(fake_rxn_abunds, kegg_rxn_abunds) #List of different gene abundance tables
+
+fake_mets_melt[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes[1:10,Code], collapse=""), "_TP", TimePoint)]
+fake_mets = dcast(fake_mets_melt, compound ~ Sample, value.var="value")
+
+fake_mets_kegg = merge(fake_mets, path_key[,list(medium, KEGG)], by.x = "compound", by.y="medium", all.x=T, all.y=F)
+fake_mets_kegg = fake_mets_kegg[!is.na(KEGG)][,c(names(fake_mets_kegg)[grepl("run", names(fake_mets_kegg))], "KEGG"),with=F]
+setkey(fake_mets_kegg, "KEGG")
+
+#Now apply MIMOSA to each matrix of reaction abundances
+mimosa_results = vector("list", length(all_gene_dats))
+
+mimosa_results[[1]] = run_all_metabolites_FBA("fixRevRxns", fake_mets = fake_mets, fake_genes = all_gene_dats[[1]], gene_type = "genes", species_rxns = specRxns, rxn_mets = emm, spec_codes = spec_codes, kegg_translate = kegg_translate, nperm = 3000)
+
+###### Generate KEGG metabolic network model
+all_kegg = get_kegg_reaction_info(paste0(kegg_dir, "reaction_ko.list"), reaction_info_file = paste0(kegg_dir, "reaction"))
+rxn_table = generate_network_template_kegg(paste0(kegg_dir, "reaction_mapformula.lst"), all_kegg = all_kegg, write_out = F)
+
+### Run MIMOSA using KEGG model and IDs
+run_all_metabolites(file_prefix = "noMusicc", genes = all_gene_dats[[2]], mets = fake_mets_kegg, rxn_table_source = rxn_table, net_method = "KeggTemplate", degree_filter = 40, norm = F, nperm = 3000)
+load("noMusicc_out.rda")
+mimosa_results[[2]] = list(all_comparisons, node_data, mets[!KEGG %in% node_data[,compound],KEGG], melt(get_cmp_scores(ko_net[[1]], norm_kos), id.var = "compound", variable.name = "Sample"))
+```
+
+Run species contributor analysis
+
+```{r, echo=F, message=F, warning=F}
+#Species contributions
+#Merge specRxns with reversibility info
+specRxns_melt = melt(specRxns, id.var = "RxnID", variable.name = "Code", value.name = "CopyNum")
+specRxns_melt = specRxns_melt[CopyNum != 0]
+specRxns_melt[,Code:=as.character(Code)]
+specRxns_melt = merge(specRxns_melt, spec_codes, by = "Code")
+
+
+## Contribution tables
+contrib_table_genes = FBA_picrust_contribs(fake_spec2, specRxns_melt)
+setnames(contrib_table_genes, c("Species", "RxnID"), c("OTU","Gene"))
+contrib_table_kegg = FBA_picrust_contribs(fake_spec_rel, genomes)
+setnames(contrib_table_kegg, c("Species", "RxnID"), c("OTU","Gene"))
+
+spec_codes = spec_codes[1:10]
+#### Generate species-specific models
+## Note - this produces slightly lower accuracy than using truly species-specific stoichiometric matrices from the AGORA models (see FBA_functions)
+spec_emms = list()
+for(j in 1:nrow(spec_codes)){
+  spec_emms[[j]] = emm[,names(emm) %in% specRxns_melt[Code==spec_codes[j,Code], RxnID], with=F]
+  comps = which(apply(spec_emms[[j]], 1, function(x){ length(x[x != 0])}) > 0)
+  spec_emms[[j]] = data.table(Compound = emm[comps, Compound], spec_emms[[j]][comps])
+}
+
+all_koAbunds_byOTU_genes = contribs_by_species_list(contrib_table_genes, "singleMusicc", "FBAout", write_out = F)[match(spec_codes[,Code], sort(spec_codes[,Code]))]
+all_koAbunds_byOTU_kegg = contribs_by_species_list(contrib_table_kegg, "singleMusicc", "FBAout", write_out = F)[match(spec_codes[,Code], sort(spec_codes[,Code]))]
+
+cmps_alone = list(singleSpecCMP_FBA(spec_codes[,Code], all_koAbunds_byOTU_genes, spec_emms),
+                  get_all_singleSpec_cmps(spec_codes[,Code], all_koAbunds_byOTU_kegg, valueVar = "singleMusicc", out_prefix = "cmpKegg", rxn_table, degree_filter = 40, write_out = F))
+
+for(k in 1:length(cmps_alone[[1]])){
+	cmps_alone[[1]][[k]][,compound:=gsub("[e]", "[env]",compound, fixed = T)]
+  setkey(cmps_alone[[1]][[k]], "compound")
+}
+subjects = names(cmps_alone[[1]][[1]])[names(cmps_alone[[1]][[1]]) != "compound"]
+
+all_comps = gsub("[e]", "[env]", emm[,Compound], fixed=T)
+emm2 = data.frame(emm[,2:ncol(emm),with=F])
+row.names(emm2) = all_comps
+emm_kegg = generate_genomic_network(genomes[,unique(RxnID)], degree_filter = 40, normalize = F, rxn_table = rxn_table)[[1]]
+
+cmp_mats = vector("list", length(all_gene_dats))
+comps = fake_mets[,unique(compound)]
+kegg_comps = fake_mets_kegg[KEGG %in% row.names(emm_kegg),KEGG]
+
+cmp_mats[[1]] = get_cmp_scores(emm2, all_gene_dats[[1]])[compound %in% comps]
+cmp_mats[[2]] = get_cmp_scores(emm_kegg, all_gene_dats[[2]])[compound %in% kegg_comps]
+
+all_rxns = lapply(comps, function(x){ 
+  if(nrow(edge_list[Reac==x|Prod==x]) > 0){
+      return(data.table(edge_list[Reac==x|Prod==x], Reversible = 0))
+  } else { return(NA) }
+})
+comps = comps[which(sapply(all_rxns, function(x){ !identical(x,NA)}))]
+all_rxns = all_rxns[which(sapply(all_rxns, function(x){ !identical(x,NA)}))]
+
+all_rxns_kegg = lapply(kegg_comps, function(x){
+  return(get_non_rev_rxns(rxn_table[Reac==x|Prod==x]))
+})
+
+spec_contribs = vector("list", length(all_gene_dats))
+spec_contribs[[1]] = rbindlist(lapply(1:length(comps), cmp_species_contributions_picrust, cmps_sub_good = cmp_mats[[1]], all_rxns = all_rxns, subjects = subjects, norm_kos = all_gene_dats[[1]], ko_net = "", all_taxa = spec_codes[,Code], cmps_alone[[1]], comparison = "mets", met_data = fake_mets))
+spec_contribs[[1]][,Version:="fixRevRxns"]
+spec_contribs[[2]] = rbindlist(lapply(1:length(kegg_comps), cmp_species_contributions_picrust, cmps_sub_good = cmp_mats[[2]], all_rxns = all_rxns_kegg, subjects = subjects, norm_kos = all_gene_dats[[2]], ko_net = "", all_taxa = spec_codes[,Code], single_spec_cmps = cmps_alone[[2]], comparison = "mets", met_data = fake_mets_kegg))
+spec_contribs[[2]] = merge(spec_contribs[[2]], path_key, by.x = "compound", by.y = "KEGG", all.x = T, all.y = F)
+setnames(spec_contribs[[2]], c("medium", "compound"), c("compound", "KEGG"))
+spec_contribs[[2]][,Version:="KEGG"]
+
+spec_contribs = rbindlist(spec_contribs, fill = T)
+spec_contribs = merge(spec_codes, spec_contribs, by.x = "Code", by.y = "Species")
+spec_contribs[,ContribMethod:="Met"]
+
+prefixes = c("fixRevRxns", "KEGG")
+node_data_list = lapply(1:length(mimosa_results), function(x){ 
+  dat = mimosa_results[[x]][[2]]
+  dat[,Dataset:=prefixes[x]]
+  return(dat)})
+node_data_list[[2]][,PredictionType:=ifelse(QValPos < 0.1, "Consistent", "Inconsistent")]
+node_data_list[[2]][,PredictionType:=ifelse(QValNeg < 0.1, "Contrasting", PredictionType)]
+setnames(node_data_list[[2]], "compound", "KEGG")
+node_data_list[[2]] = merge(node_data_list[[2]], path_key[,list(medium, KEGG)], by="KEGG", all.x=T)
+setnames(node_data_list[[2]], "medium", "compound")
+node_data_all = rbindlist(node_data_list, fill = T)
+node_data_all = node_data_all[compound %in% shap_contribs[,unique(compound)]]
+
+setnames(node_data_all, "Dataset", "Version")
+mimosa_contribs_all = fix_mimosa_contribs_table(spec_contribs, node_data_all, shap_contribs, id_vars = c("compound", "Species", "Version"))
+
+mimosa_contribs_all_sub = mimosa_contribs_all[compound %in% shap_contribs[, unique(compound)]]
+
+mimosa_ROC_dat = roc(predictor = mimosa_contribs_all_sub[!is.na(PredictionType) & Version == "fixRevRxns", CorScale], response =  mimosa_contribs_all[!is.na(PredictionType) & Version == "fixRevRxns", BinaryContribPos], ci = T, ci.method = "bootstrap", boot.n = 500)
+corr_roc = roc(predictor = spec_met_corrs[, CorScaleAbs], response = spec_met_corrs[, BinaryContribPos])
+
+mimosa_roc_plotDat = data.table(TPR = mimosa_ROC_dat$sensitivities, FPR = 1-mimosa_ROC_dat$specificities, Method="MIMOSA")
+mimosa_roc_plotDat = rbind(mimosa_roc_plotDat, data.table(TPR = corr_roc$sensitivities, FPR=1-corr_roc$specificities, Method="Correlation"))
+
+mimosa_roc_plot = ggplot(mimosa_roc_plotDat, aes(x=FPR, y = TPR, color=factor(Method, levels = c("MIMOSA", "Correlation")))) + geom_abline(slope=1, intercept=0, linetype=2)+ geom_line(size = 1.2) + scale_y_continuous(expand = c(0,0)) + scale_x_continuous(expand = c(0,0)) + scale_color_manual(values = brewer.pal(3, "Set1")[c(2,1)]) + theme(legend.title = element_blank(), legend.text = element_text(size=9),axis.text= element_text(size=8), axis.title = element_text(size=9), plot.margin = margin(0.3, 0.3, 0.3, 0.3, "inches"), legend.position = c(0.5, 0.3))
+
+mimosa_kegg_ROC_dat = roc(predictor = mimosa_contribs_all_sub[!is.na(PredictionType) & Version == "KEGG", CorScale], response =  mimosa_contribs_all[!is.na(PredictionType) & Version == "KEGG", BinaryContribPos], ci = T, ci.method = "bootstrap", boot.n = 500)
+
+#MIMOSA stats  
+mimosa_contribs_all_sub[Version=="fixRevRxns" & !is.na(PredictionType),table(MOutcome, PassWords)]
+mimosa_contribs_all_sub[Version=="fixRevRxns" & !is.na(PredictionType) & PassWords == "MIMOSA\ncontributor", sum(MOutcome=="True positive")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="fixRevRxns" & !is.na(PredictionType) & BinaryContribPos==1, sum(MOutcome=="True positive")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="fixRevRxns" & !is.na(PredictionType) & BinaryContribPos==0, sum(MOutcome=="True negative")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="fixRevRxns" & !is.na(PredictionType), length(unique(compound))]
+
+#KEGG MIMOSA stats
+mimosa_contribs_all_sub[Version=="KEGG" & !is.na(PredictionType),table(MOutcome, PassWords)]
+mimosa_contribs_all_sub[Version=="KEGG" & !is.na(PredictionType) & PassWords == "MIMOSA\ncontributor", sum(MOutcome=="True positive")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="KEGG" & !is.na(PredictionType) & BinaryContribPos==1, sum(MOutcome=="True positive")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="KEGG" & !is.na(PredictionType) & BinaryContribPos==0, sum(MOutcome=="True negative")/length(MOutcome)]
+mimosa_contribs_all_sub[Version=="KEGG" & !is.na(PredictionType), length(unique(compound))]
+
+compare_mimosa_noNoise = spec_met_corrs
+compare_mimosa_noNoise[,Outcome_v2:=ifelse(BinaryContribPos==1 & p.value < 0.01, "True positive", "False negative")]
+compare_mimosa_noNoise[,Outcome_v2:=ifelse(BinaryContribPos==0 & p.value < 0.01, "False positive", Outcome_v2)]
+compare_mimosa_noNoise[,Outcome_v2:=ifelse(BinaryContribPos==0 & p.value > 0.01, "True negative", Outcome_v2)]
+mimosa_contribs_basic = mimosa_contribs_all_sub[Version =="fixRevRxns"]
+mimosa_contribs_basic[,Outcome_v2:=MOutcome]
+
+compare_mimosa_noNoise[,Method:="Correlation"]
+mimosa_contribs_basic[,Method:="MIMOSA"]
+compare_mimosa_noNoise[,PassWords:=ifelse(p.value < 0.01, "Correlated", "Not\ncorrelated")]
+compare_mimosa_noNoise = rbind(compare_mimosa_noNoise, mimosa_contribs_basic, fill = T)
+
+corr_barplot = ggplot(compare_mimosa_noNoise[grepl("MIMOSA", PassWords)], aes(x=PassWords, fill = factor(Outcome_v2, levels = c("False negative", "True positive", "False positive", "True negative")))) + geom_bar(position="stack", stat="count") + scale_fill_manual(values = c("grey50", "grey50", "grey80", "grey80")) + theme(legend.title = element_blank(), axis.ticks = element_blank(), axis.text = element_text(size=15), axis.title = element_text(size=15)) + xlab("") + ylab("Number of\nspecies-metabolite pairs")  + scale_y_continuous(expand=c(0,0)) + guides(fill = F) + annotate("text", x = "MIMOSA\ncontributor", y = 42, label = "True positive", col = "white",size = 3.5) + annotate("text", x = "MIMOSA\ncontributor", y = 10, label = "False positive", col = "black",size = 3.5) + annotate("text", x = "MIMOSA\nnon-contributor", y = 250, label = "True negative", col = "black",size = 3.5) + annotate("text", x = "MIMOSA\nnon-contributor", y = 435, label = "False negative", col = "white",size = 3.5)
+
+save_plot(corr_barplot, file = "MIMOSA_barplot.png", base_width = 4, base_height = 4)
+
+# corr_barplot = ggplot(mimosa_contribs_basic, aes(x=PassWords, fill = factor(Outcome_v2, levels = c("False negative", "True positive", "False positive", "True negative")))) + geom_bar(position="stack", stat="count") + scale_fill_manual(values = c("grey50", "grey50", "grey80", "grey80")) + theme(legend.title = element_blank(), axis.ticks = element_blank(), axis.text = element_text(size=15), axis.title = element_text(size=15)) + xlab("") + ylab("Number of\nspecies-metabolite pairs")  + scale_y_continuous(expand=c(0,0)) + guides(fill = F) + annotate("text", x = "MIMOSA\ncontributor", y = 42, label = "True positive", col = "white",size = 2.4) + annotate("text", x = "MIMOSA\ncontributor", y = 10, label = "False positive", col = "black",size = 2.4) + annotate("text", x = "MIMOSA\nnon-contributor", y = 250, label = "True negative", col = "black",size = 2.4) + annotate("text", x = "MIMOSA\nnon-contributor", y = 435, label = "False negative", col = "white",size = 2.4)
+
+fig6 = plot_grid(corr_barplot+ theme(legend.title = element_blank(), axis.text= element_text(size=8), axis.title = element_text(size=9), plot.margin = margin(0.3, 0.3, 0.3, 0.3, "inches")), mimosa_roc_plot, labels = c("A", "B"), rel_widths = c(1, 1.1), align = "h", axis = "tb")
+save_plot(fig6, file = "fig6_MIMOSA.png", base_width = 5.8, base_height = 3)
+
+
+```
