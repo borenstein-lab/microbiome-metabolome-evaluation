@@ -1,0 +1,613 @@
+---
+title: "Analyses of HMP-based simulation dataset - Contributions and correlations"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r, echo=F, message=F, warning=F}
+options(stringsAsFactors = F, scipen = 20)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(R.matlab)
+library(RColorBrewer)
+library(mimosa)
+library(Rcpp)
+library(grid)
+library(vegan)
+library(ape)
+library(Hmisc)
+library(ggbeeswarm)
+
+source("FBA_functions.R")
+
+#Data Files
+media_files = list.files(path = "HMP_media", pattern = "FaithMediaAGORA_HMPexpanded_1_")
+dictionary_file = "Dictionary_AGORA_all_1.csv"
+brite_files = list.files("../../KEGGfiles/KEGG_2018/", pattern = "br.*.keg")[1:3]
+
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+spec_file = "HMP_test577_HMP_noise_specAbunds.txt"
+met_file = "HMP_test577_HMP_noise_metAbunds.txt"
+all_fluxes_file = "HMP_test577_HMP_noise_metFluxesFinal.txt"
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
+
+media = rbindlist(lapply(1:length(media_files), function(x){
+  foo = fread(paste0("HMP_media/", media_files[x]))
+  foo[,SimRun:=as.numeric(gsub(".csv", "", gsub("FaithMediaAGORA_HMPexpanded_1_", "", media_files[x])))]
+}))
+
+media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
+setnames(media, "V1", "medium")
+
+timePointFinal = 577
+
+spec_info = fread("agora_species_info.txt")
+spec_info[,SpeciesID:=gsub(" ", "_", organism)]
+spec_info[,SpeciesID:=gsub("\\.", "_", SpeciesID)]
+spec_info[,SpeciesID:=gsub("\\-", "_", SpeciesID)]
+spec_info[,SpeciesID:=gsub("\\,", "", SpeciesID)]
+spec_info[,SpeciesID:=gsub("\\/", "_", SpeciesID)]
+spec_info[,SpeciesID:=gsub("_=.*", "", SpeciesID)]
+spec_info[,SpeciesID:=gsub("__", "_", SpeciesID)]
+
+
+```
+
+Species abundance data:
+
+```{r, echo=F, message=F, warning=F}
+fake_spec = fread(spec_file)
+fake_spec[,SampleID:=SimRun]
+
+fake_spec[,Genus:=gsub("_.*", "", Species)]
+fake_spec[,length(unique(Species))]
+fake_spec[,length(unique(Genus))]
+
+fake_spec = merge(fake_spec, spec_info, by.x = "Species", by.y = "SpeciesID", all.x = T)
+
+
+## Setup
+fake_spec[,unique(order)]
+order_order = fake_spec[,sum(value), by=list(order, Sample)][,mean(V1), by=order][order(V1, decreasing = T), order]
+fake_spec[,order:=factor(order, levels = order_order)]
+fake_spec[,order2:=ifelse(order %in% order_order[1:11], as.character(order), "Other")]
+fake_spec[,order2:=factor(order2, levels = c(order_order[1:11],"Other"))]
+
+getPalette = colorRampPalette(brewer.pal(8, "Set2"))
+
+samp_order_final = paste0("run", 1:57, "__TP577")
+samp_order_first = paste0("run", 1:57, "__TP1")
+
+spec_codes = data.table(Species = sort(unique(fake_spec[,Species])))
+spec_codes[!Species %in% spec_info[,SpeciesID], Species]
+  
+
+top_spec = fake_spec[,max(value), by = list(Species, organism, genus, order, phylum)][order(V1, decreasing = T)]
+fake_spec[,Species2:=ifelse(Species %in% top_spec[V1 > 0.05, Species], organism, "Other")]
+
+top_spec[V1 > 0.05, length(unique(Species)), by=phylum] # 4 phyla
+
+blue_ramp = colorRampPalette(brewer.pal(9,"Blues")[4:9])
+red_ramp = colorRampPalette(brewer.pal(9, "Reds")[4:9])
+
+spec_color_scale = c(blue_ramp(18), red_ramp(16), brewer.pal(8, "Greens")[c(5,6,7)], brewer.pal(8, "Purples")[c(5,7)], "gray")
+names(spec_color_scale) = c(top_spec[V1 > 0.05 & phylum=="Firmicutes"][order(genus), organism], top_spec[V1 > 0.05 & phylum=="Bacteroidetes"][order(genus), organism], top_spec[V1 > 0.05 & phylum=="Proteobacteria"][order(genus), organism],top_spec[V1 > 0.05 & phylum=="Actinobacteria"][order(genus), organism], "Other")
+fake_spec[,Species2:=factor(Species2, levels = names(spec_color_scale))]
+  
+spec_plot_all = ggplot(fake_spec, aes(x=factor(SimRun), y = value, fill = Species2)) + geom_bar(position = "fill", stat = "identity", color = "black") + theme_classic() + scale_y_continuous(expand=c(0,0)) + theme(axis.ticks = element_blank(), legend.title = element_blank(), legend.text = element_text(size=9), axis.title = element_text(size=15), axis.text.y = element_text(size=13),axis.text.x = element_blank(), legend.position = "bottom", legend.key.size = unit(0.14, "inches"), plot.margin = unit(c(0.2,0.2,0.1,0.2), "inches")) + xlab("Samples") + ylab("Relative abundance") + scale_size_manual(values = c(0,1)) + guides(col = F, size = F) + scale_fill_manual(values =spec_color_scale) + guides(fill = guide_legend(ncol = 3)) #+ scale_x_discrete(limits =samp_order_first )
+save_plot(spec_plot_all, file = "HMP_species_composition.png", base_width = 9, base_height = 6)
+
+
+```
+
+Original species abundances:
+
+```{r, echo=F, message = F, warning = F}
+all_species = fread("HMP_test577_HMP_noise_allSpecies.txt")
+orig_abunds = all_species[TimePoint==1]
+orig_abunds[,Sample:=paste0("run", SimRun, "__TP", TimePoint)]
+orig_abunds = merge(orig_abunds, spec_info, by.x = "Species", by.y = "SpeciesID", all.x = T)
+
+orig_abunds[,order:=factor(order, levels = order_order)]
+orig_abunds[,order2:=ifelse(order %in% order_order[1:11], as.character(order), "Other")]
+orig_abunds[,order2:=factor(order2, levels = c(order_order[1:11],"Other"))]
+
+compare_spec = rbind(fake_spec, orig_abunds, fill = T)
+compare_spec[,TimePoint2:=factor(ifelse(TimePoint==577, "144hr", "Initial"), levels = c("Initial", "144hr"))]
+
+```
+
+Metabolite concentration data:
+
+```{r, echo=F, message=F, warning=F}
+
+fake_mets_melt = fread(met_file)
+fake_mets_melt[,Run:=gsub("_.*", "", Sample)]
+fake_mets_melt[,Run:=as.numeric(gsub("run", "", Run))]
+
+met_list = fake_mets_melt[,unique(niceLab)]
+met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), as.character(niceLab)]
+met_ids = fake_mets_melt[,unique(medium)]
+
+fake_mets_melt[,compound:=medium]
+dictionary_sub = get_hmp_dictionary(dictionary_file, brite_files = brite_files, mets_melt = fake_mets_melt)
+
+
+
+```
+
+
+Distributions of species and metabolites
+
+```{r, echo=F, message=F, warning=F}
+
+spec_prevalence = fake_spec[,length(value[value != 0]), by=Species]
+prevalent_spec = spec_prevalence[V1 > 3, Species]
+
+spec_dists = ggplot(fake_spec[Species %in% prevalent_spec], aes(x=value)) + geom_histogram(bins = 20) + facet_wrap(~Species, scales = "free", ncol = 5) + theme(strip.background = element_blank()) + xlab("Species abundance") + ylab("Sample count") + theme(axis.text = element_text(size=5), axis.title = element_text(size=9), strip.text = element_text(size = 5)) + scale_y_continuous(expand = c(0,0))
+
+spec_dists2 = ggplot(fake_spec[Species %in% prevalent_spec], aes(x=value, color = Species)) + geom_density() + theme(strip.background = element_blank()) + xlab("Species abundance")  + theme(axis.text = element_text(size=5), axis.title = element_text(size=9), strip.text = element_text(size = 5)) + scale_y_continuous(expand = c(0,0)) + guides(color = F)# facet_wrap(~Species, scales = "free", ncol = 5) + ylab("Sample count")
+
+
+```
+
+Ordination plots of species and metabolites
+
+```{r, echo=F, message=F, warning=F}
+spec_mat = as.matrix(dcast(fake_spec, SampleID~Species, value.var = "value"))
+spec_dist = vegdist(spec_mat[,2:ncol(spec_mat)], method = "bray")
+spec_pcoa = pcoa(spec_dist)
+
+spec_mat2 = as.matrix(dcast(compare_spec, Sample~Species, value.var = "value", fill = 0)) # starting values didn't have all species
+samp_order = spec_mat2[,1]
+spec_dist2 = vegdist(apply(spec_mat2[,2:ncol(spec_mat2)], 2, as.numeric), method = "bray")
+spec_ord2 = metaMDS(spec_dist2, trymax = 60, distance = "bray")
+spec_pcoa2 = pcoa(spec_dist2)
+
+pcoa_dat = data.table(spec_pcoa2$vectors)
+pcoa_dat[,Sample:=samp_order]
+pcoa_dat[,TimePoint:=gsub(".*__TP", "", Sample)]
+pcoa_dat[,SimRun:=gsub("__TP.*", "", Sample)]
+pcoa_dat[,TimePoint2:=factor(ifelse(TimePoint==577, "144hr", "Initial"), levels = c("Initial", "144hr"))]
+pcoa_compare_plot = ggplot(pcoa_dat, aes(x=`Axis.1`, y = `Axis.2`, shape = TimePoint2))  + geom_line(aes(group = SimRun), alpha = 0.5) + geom_point(size = 2.5, aes(color = TimePoint2))+ theme(legend.title = element_blank())+ scale_color_brewer(palette = "Set1")
+save_plot(pcoa_compare_plot, file = "HMP_pcoa_compare_plot.png", base_width = 5, base_height = 4)
+
+
+fake_mets_melt[,SimRun:=Run]
+met_mat = as.matrix(dcast(fake_mets_melt, SimRun~compound, value.var = "value"))
+met_mat = met_mat[,2:ncol(met_mat)]
+met_mat = met_mat[apply(met_mat, 1, var) != 0,]
+met_mat = met_mat[,apply(met_mat, 2, var) != 0]
+met_pca = prcomp(met_mat, scale.=T, center = T)
+biplot(met_pca)
+met_pca_tab = data.table(met_pca$x)
+met_pca_tab[,Sample:=1:57]
+ggplot(met_pca_tab, aes(x=PC1, y = PC2, label = Sample)) + geom_text() 
+
+met_pca_plot = ggplot(met_pca_tab, aes(x=PC1, y = PC2)) + geom_point(size=0.9)+ theme_cowplot() + xlab("PC1 (19.3%)") + ylab("PC2 (10.2%)")
+save_plot(met_pca_plot, file = "HMP_met_PCA.png", base_width = 4, base_height = 4)
+
+```
+
+Get contributions, general statistics about them
+
+```{r, echo=F, message=F, warning=F}
+
+all_met_fluxes_final1 = fread(all_fluxes_file)
+
+shap_contribs1 = getContributions(all_met_fluxes_final1)
+
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=compound]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+
+
+#No variance cutoff for HMP metabolites
+#var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+#met_summary[Variance != 0]
+#shap_contribs = shap_contribs1[TrueVar > var_cutoff]
+shap_contribs = shap_contribs1
+met_summary[compound %in% shap_contribs[,compound], median(CoefVar)]
+
+
+#Get scaled contribution values
+shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=compound]
+shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=compound]
+contrib_threshold_pos = 0.1
+contrib_threshold_mag = 0.2
+shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+
+shap_contribs[Species != "Inflow", table(BinaryContribPos)]
+shap_contribs[BinaryContribPos==1 & Species!="Inflow", length(unique(Species))]
+#shap_contribs = merge(shap_contribs, path_key, by.x = c("niceLab", "compound"), by.y = c("niceLab", "medium"), all.x=T)
+shap_contribs = merge(shap_contribs, spec_info[,list(SpeciesID, kingdom, phylum, mclass, order, family, genus)], by.x="Species", by.y = "SpeciesID", all.x = T)
+shap_contribs[,sum(BinaryContribPos), by=genus][order(V1, decreasing = T)]
+#all_met_fluxes_final = all_met_fluxes_final1[niceLab %in% shap_contribs[,unique(niceLab)]]
+
+
+shap_contribs[,mediaMet:=ifelse(compound %in% media[,medium], 1, 0)]
+shap_contribs = merge(shap_contribs, met_summary, by = "compound", all.x=T, all.y=F)
+shap_contribs = merge(shap_contribs, dictionary_sub, by.x = "compound", by.y = "medium", all.x = T)
+
+mean_flux= all_met_fluxes_final1[,list(mean(cumulFlux), var(cumulFlux)), by=list(compound,Species)]
+setnames(mean_flux, c("V1","V2"), c("meanFlux", "varFlux"))
+shap_contribs = merge(shap_contribs, mean_flux, by = c("compound", 'Species'), all.x=T, all.y=F)
+
+#all_met_fluxes_final = merge(all_met_fluxes_final, spec_codes, by = "Species")
+rxn_pairs = all_met_fluxes_final1[Species != "Inflow" & compound %in% shap_contribs[,compound],list(length(unique(Species[cumulFlux >0])), length(unique(Species[cumulFlux <0]))), by=compound]
+rxn_pairs[,Synth:=ifelse(V1 > 0,1,0)]
+rxn_pairs[,Deg:=ifelse(V2 > 0,1,0)]
+rxn_pairs[,sum(Synth) > 0 & sum(Deg) > 0, by=compound][V1==T] 
+rxn_pairs[,mediaMet:=ifelse(compound %in% shap_contribs[mediaMet==1, unique(compound)], 1, 0)]
+rxn_pairs[,table(Synth, Deg, mediaMet)]
+rxn_pairs[mediaMet==1 & Synth==1 & Deg==0] #weird
+rxn_pairs[,table(Synth,Deg)]
+
+rxn_pairs_spec = all_met_fluxes_final1[Species != "Inflow" & compound %in% shap_contribs[,unique(compound)], list(length(unique(SimRun[cumulFlux > 0])), length(unique(SimRun[cumulFlux < 0]))), by=list(compound, Species)]
+setnames(rxn_pairs_spec, c("V1", "V2"), c("SynthSamples", "DegSamples"))
+#setnames(rxn_pairs_spec, "medium", "compound")
+shap_contribs = merge(shap_contribs, rxn_pairs_spec, by = c("compound", "Species"), all.x=T, all.y=F)
+
+#Do negative contributions arise via cross-feeding or competition?
+
+shap_contribs[Species != "Inflow",list(sum(V1 < 0), sum(SynthSamples > 0), sum(DegSamples > 0)), by=list(Metabolite, mediaMet)][V1 > 0,table(V2 > 0 & V3 > 0, mediaMet)]
+shap_contribs[Species != "Inflow",list(sum(V1 < 0), sum(SynthSamples > 0), sum(DegSamples > 0)), by=list(Metabolite, mediaMet)][,table(V1 > 0, V2 > 0 & V3 > 0, mediaMet)]
+
+shap_contribs[,niceLab:=tolower(Metabolite)]
+shap_contribs[,sum(V1 < 0), by=list(niceLab, mediaMet)][,table(mediaMet, V1 > 0)]
+shap_contribs[,sum(V1 < 0), by=list(niceLab, mediaMet)][,median(V1), by=mediaMet]
+
+#Do species with the highest average flux have the highest contribution?
+shap_contribs[,cor(abs(meanFlux), abs(VarShare), method="spearman"), by=compound][,summary(V1)]
+shap_contribs[,cor.test(abs(meanFlux), abs(VarShare), method="spearman")$p.value, by=compound][,table(V1 < 0.01)]
+shap_contribs[,cor.test(abs(meanFlux), abs(VarShare), method="spearman")$estimate, by=compound][,mean(V1)]
+shap_contribs[,cor.test(abs(meanFlux), abs(VarShare), method="spearman")$estimate, by=compound][,median(V1)]
+#Ok, yes in this case
+
+
+shap_contribs[BinaryContribPos==1 & Species != "Inflow", table(Species %in% prevalent_spec)] #wow surprisingly not all
+shap_contribs[BinaryContribPos==1 & !Species %in% prevalent_spec, unique(Species)]
+
+shap_contribs[PosVarShare > 0.1, unique(Species)] #Only a subset of species
+
+
+#shap_contribs = merge(shap_contribs, spec_info, by.x ="Species", by.y = "SpeciesID", all.x = T)
+
+taxonomy_order = spec_info[order(kingdom, phylum, mclass, order, family, genus, SpeciesID)]
+
+genus_counts = shap_contribs[Species != "Inflow",sum(BinaryContribPos), by=list(genus, compound)]
+genus_counts[,genus:=factor(genus, levels = rev(taxonomy_order[,unique(genus)]))]
+genus_counts = genus_counts[genus %in% genus_counts[,sum(V1), by=genus][V1 != 0, genus]]
+genus_counts = merge(genus_counts, dictionary_sub[,list(medium, Metabolite)], by.x = "compound", by.y = "medium", all.x = T)
+contrib_plot = ggplot(genus_counts, aes(x=Metabolite, y = genus, fill = V1)) + geom_tile() + scale_fill_distiller(palette = "Blues", direction = 1) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.ticks = element_blank()) + guides(fill = guide_legend(title = "N key contributor species"))
+
+order_counts = shap_contribs[Species != "Inflow",sum(BinaryContribPos), by=list(order, compound)]
+order_counts[,order:=factor(order, levels = rev(taxonomy_order[,unique(order)]))]
+order_counts = order_counts[order %in% order_counts[,sum(V1), by=order][V1 != 0, order]]
+#order_counts = merge(order_counts, dictionary[,list(medium, niceLab2)], by.x = "compound", by.y = "medium", all.x = T)
+contrib_plot = ggplot(order_counts, aes(x=compound, y = order, fill = V1)) + geom_tile() + scale_fill_distiller(palette = "Blues", direction = 1) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.ticks = element_blank()) + guides(fill = guide_legend(title = "N key contributor species"))
+
+
+order_counts= merge(order_counts, dictionary_sub[,list(medium, Category)], by.x = "compound", by.y = "medium", all.x = T)
+order_counts2 = order_counts[,sum(V1), by=list(order, Category)]
+
+levels(order_counts2$Category) = c("Carbohydrates", "Organic acids", "Steroid metabolites", "Nucleotide metabolites", "Peptides and amino\nacid metabolites", "Vitamins and cofactors", "Metals and\ninorganic compounds", "Other")
+contrib_plot = ggplot(order_counts2, aes(x=Category, y = order, fill = V1)) + geom_tile() + scale_fill_continuous(low = "white", high = brewer.pal(8, "Blues")[8]) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.ticks = element_blank()) + guides(fill = guide_legend(title = "Number of key\ncontributions", ncol = 2)) + xlab("") + ylab("")
+# 
+
+
+```
+
+
+Correlation Plots (Figure 3)
+
+```{r, echo=F, message=F, warning=F}
+fake_mets_melt_good = fake_mets_melt
+spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt = fake_mets_melt_good, shap_contribs, outcome_var = "BinaryContribPos")
+
+spec_met_corrs = spec_met_corrs[!is.na(BinaryContribPos)]
+
+#How different are relative abundances?
+##Also compare results with relative abundance of species - could be more different here since biomass is more different
+
+fake_spec2 = copy(fake_spec)
+fake_spec2[,value:=value/sum(value), by=SimRun]
+spec_met_corrs_rel = get_correlation_contrib_comparison(fake_spec2, fake_mets_melt_good, shap_contribs, outcome_var = "BinaryContribPos")
+spec_met_corrs_compare = merge(spec_met_corrs, spec_met_corrs_rel[,list(Species,compound, estimate, p.value, Outcome)], by=c("Species", "compound"), all=T)
+spec_met_corrs_compare[,table(p.value.x < 0.01, p.value.y < 0.01)]
+spec_met_corrs_compare[,list(sum(p.value.x < 0.01, na.rm=T), sum(p.value.y < 0.01,na.rm=T))] # more significant correlations!!
+spec_met_corrs_compare[Outcome.x != Outcome.y]
+spec_met_corrs_compare[,table(Outcome.x, Outcome.y)]
+
+spec_met_corrs[,Outcome_v2:=ifelse(BinaryContribPos==1 & p.value < 0.01, "True positive", "True negative")]
+spec_met_corrs[,Outcome_v2:=ifelse(BinaryContribPos==1 & p.value > 0.01, "False negative", Outcome_v2)]
+spec_met_corrs[,Outcome_v2:=ifelse(BinaryContribPos==0 & p.value < 0.01, "False positive", Outcome_v2)]
+spec_met_corrs[,CorrResult:=ifelse(p.value < 0.01, "Correlated", "Not\ncorrelated")]
+spec_met_corrs[,BinaryWord:=ifelse(BinaryContribPos==1, "Key contributor", "Non-contributor")]
+
+#In order to compare fairly between datasets, use equivalent b-h q-value
+### Compare with original 10 spec dataset
+spec_file_orig = "allSpeciesFinalMain.txt"
+met_file_orig = "allMetabolitesFinalMain.txt"
+all_fluxes_file_orig = "allMetFluxesFinalMain.txt"
+fake_spec_orig = fread(spec_file_orig)
+fake_spec_orig[,SampleID:=SimRun]
+spec_codes_orig = make_spec_codes()
+
+fake_mets_melt_orig = fread(met_file_orig)
+#fake_mets_melt_orig = merge(fake_mets_melt_orig, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
+fake_mets_melt_orig[,Sample:=paste0("run", SimRun, "_", paste0(spec_codes_orig[,Code], collapse=""), "_TP", TimePoint)]
+fake_mets_melt_orig[,Run:=gsub("_.*", "", Sample)]
+fake_mets_melt_orig[,Run:=as.numeric(gsub("run", "", Run))]
+
+all_met_fluxes_final_orig = fread(all_fluxes_file_orig)
+
+#kegg_translate[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
+shap_contribs1_orig = getContributions(all_met_fluxes_final_orig, spec_codes = spec_codes_orig[Code != "out"])
+
+met_summary_orig = fake_mets_melt_orig[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
+setnames(met_summary_orig, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+
+var_cutoff_orig = met_summary_orig[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+shap_contribs_orig = shap_contribs1_orig[TrueVar > var_cutoff_orig]
+
+#Get scaled contribution values
+shap_contribs_orig[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=compound]
+shap_contribs_orig[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=compound]
+
+shap_contribs_orig[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+shap_contribs_orig[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+fake_mets_melt_good_orig = fake_mets_melt_orig[compound %in% shap_contribs_orig[,compound]]
+fake_mets_melt_good_orig[,Sample:=gsub("inout", "", Sample)]
+spec_met_corrs_orig = get_correlation_contrib_comparison(fake_spec_orig, fake_mets_melt = fake_mets_melt_good_orig, shap_contribs = shap_contribs_orig, outcome_var = "BinaryContribPos")
+#qvals = qvalue(spec_met_corrs_orig[,p.value])$qvalues
+
+spec_met_corrs_orig[,qVal2:=p.adjust(spec_met_corrs_orig[,p.value], method = "fdr")] #Using these - 0.02712012
+qval_cutoff = spec_met_corrs_orig[p.value > 0.01, min(qVal2)]
+
+spec_met_corrs[!is.na(p.value),qVal2:=p.adjust(spec_met_corrs[,p.value], method = "fdr")] #Using these - 0.027
+spec_met_corrs[qVal2 < qval_cutoff, max(p.value)]
+spec_met_corrs[qVal2 > qval_cutoff, min(p.value)]
+new_threshold = (spec_met_corrs[qVal2 < qval_cutoff, max(p.value)] + spec_met_corrs[qVal2 > qval_cutoff, min(p.value)])/2
+
+spec_met_corrs[,OutcomeQ:=ifelse(p.value < new_threshold & BinaryContribPos==1, "True positive", "True negative")]
+spec_met_corrs[,OutcomeQ:=ifelse(p.value < new_threshold & BinaryContribPos==0, "False positive", OutcomeQ)]
+spec_met_corrs[,OutcomeQ:=ifelse(p.value > new_threshold & BinaryContribPos==1, "False negative", OutcomeQ)]
+#Sensitivity
+spec_met_corrs[BinaryContribPos==1,length(BinaryContribPos[OutcomeQ=="True positive"])/length(BinaryContribPos)] 
+#Specificity
+spec_met_corrs[BinaryContribPos==0, length(BinaryContribPos[OutcomeQ=="True negative"])/length(BinaryContribPos)]
+#Precision/FDR
+spec_met_corrs[p.value < new_threshold, length(BinaryContribPos[OutcomeQ=="True positive"])/length(BinaryContribPos)]
+
+spec_met_corrs[,table(p.value < 0.01)]
+spec_met_corrs[,table(BinaryContribPos)]
+
+spec_met_corrs[,table(Outcome)]
+spec_met_corrs[,sum(grepl("True", Outcome))/length(Outcome)]
+spec_met_corrs[,sum(grepl("True", Outcome))/length(Outcome), by=mediaMet]
+#Sensitivity
+spec_met_corrs[BinaryContribPos==1,length(BinaryContribPos[Outcome_v2=="True positive"])/length(BinaryContribPos)] 
+#Specificity
+spec_met_corrs[BinaryContribPos==0, length(BinaryContribPos[Outcome_v2=="True negative"])/length(BinaryContribPos)]
+#Precision/FDR
+spec_met_corrs[p.value < 0.01, length(BinaryContribPos[Outcome=="TruePos"])/length(BinaryContribPos)]
+
+spec_met_corrs[!is.na(p.value), prop.table(table(p.value < new_threshold))]
+###Sensitivity/etc across different p-value thresholds
+thresholds = c(0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001, 0.0000001, 0.00000001, 10e-10, 10e-11, 10e-12, 10e-13)
+sens_spec = data.table()
+for(j in thresholds){
+  sens_spec = rbind(sens_spec, data.table(spec_met_corrs[BinaryContribPos==0, sum(p.value > j)/length(p.value)], Stat="Specificity", Threshold = j), data.table(spec_met_corrs[BinaryContribPos==1, sum(p.value < j)/length(p.value)], Stat = "Sensitivity", Threshold = j), data.table(spec_met_corrs[ p.value < j, sum(BinaryContribPos)/length(p.value)], Stat = "PPV", Threshold = j), data.table(spec_met_corrs[, sum((p.value < j & BinaryContribPos==1)|(p.value > j & BinaryContribPos==0))/length(p.value)], Stat = "Accuracy", Threshold = j))
+}
+
+roc(spec_met_corrs[,BinaryContribPos], spec_met_corrs[,CorScaleAbs]) 
+
+roc(spec_met_corrs[Species %in% prevalent_spec,BinaryContribPos], spec_met_corrs[Species %in% prevalent_spec,CorScaleAbs])
+
+spec_met_corrs[p.value < 0.01 & Species %in% prevalent_spec, length(BinaryContribPos[Outcome=="TruePos"])/length(BinaryContribPos)]
+
+#Frac with relevant reaction
+spec_met_corrs[OutcomeQ=="False positive", table(SynthSamples==0 & DegSamples==0)]
+
+### Sens-Spec plots
+thresholds = c(0.1, qval_cutoff, 0.01, 0.001, 0.0001, 0.00001, 0.000001, 0.0000001, 0.00000001, 10e-10, 10e-11, 10e-12)
+sens_spec2 = data.table()
+for(j in thresholds){
+  sens_spec2 = rbind(sens_spec2, data.table(spec_met_corrs[BinaryContribPos==0, sum(qVal2 > j)/length(qVal2)], Stat="Specificity", Threshold = j), data.table(spec_met_corrs[BinaryContribPos==1, sum(qVal2 < j)/length(qVal2)], Stat = "Sensitivity", Threshold = j), data.table(spec_met_corrs[ qVal2 < j, sum(BinaryContribPos)/length(qVal2)], Stat = "PPV", Threshold = j), data.table(spec_met_corrs[, sum((qVal2 < j & BinaryContribPos==1)|(qVal2 > j & BinaryContribPos==0))/length(qVal2)], Stat = "Accuracy", Threshold = j))
+}
+
+sens_spec_orig2 = data.table()
+for(j in thresholds){
+  sens_spec_orig2 = rbind(sens_spec_orig2, data.table(spec_met_corrs_orig[BinaryContribPos==0, sum(qVal2 > j)/length(p.value)], Stat="Specificity", Threshold = j), data.table(spec_met_corrs_orig[BinaryContribPos==1, sum(qVal2 < j)/length(p.value)], Stat = "Sensitivity", Threshold = j), data.table(spec_met_corrs_orig[qVal2 < j, sum(BinaryContribPos)/length(p.value)], Stat = "PPV", Threshold = j), data.table(spec_met_corrs_orig[, sum((qVal2 < j & BinaryContribPos==1)|(qVal2 > j & BinaryContribPos==0))/length(p.value)], Stat = "Accuracy", Threshold = j))
+}
+sens_spec2[,Dataset:="HMP"]
+sens_spec_orig2[,Dataset:="TenSpecies"]
+sens_spec_combined2 = rbind(sens_spec2, sens_spec_orig2, fill = T)
+sens_spec_combined2[Stat=="PPV", Stat:="Positive\npredictive value"]
+stat_colors = c(scales::muted("green"), scales::muted("blue"), scales::muted("red"))
+names(stat_colors) = c("Specificity", "Sensitivity", "Positive\npredictive value")
+sens_spec_plot_combined_fdr = ggplot(sens_spec_combined2[Stat != "Accuracy"], aes(x=log10(Threshold), y = V1, color = factor(Stat, levels = c("Specificity","Accuracy", "Sensitivity", "Positive\npredictive value")), linetype = Dataset)) + geom_line()+geom_point(size = 1.5) + scale_color_manual(values=stat_colors, name = "") + xlab("Log correlation FDR threshold") + ylab("Fraction") + scale_y_continuous(expand = c(0,0), limits = c(0, 1.01)) + scale_x_continuous(breaks = c(-12, -9, -6, -3, 0)) #+ facet_wrap(~Dataset, scales = "free", nrow = 2)
+
+sens_spec_combined2[,Stat2:=ifelse(Stat=="Positive\npredictive value", "Precision", Stat)]
+stat_colors2 = stat_colors
+names(stat_colors2)[3] = "Precision"
+sens_spec_plot_combined_fdr2 = ggplot(sens_spec_combined2[Stat != "Accuracy" & Stat != "Specificity"], aes(x=log10(Threshold), y = V1, color = factor(Stat2, levels = c("Specificity","Accuracy", "Sensitivity", "Precision")), linetype = Dataset)) + geom_line()+geom_point(size = 1.5) + scale_color_manual(values=stat_colors2, name = "") + xlab("Log10 correlation q-value threshold") + ylab("Fraction") + scale_y_continuous(expand = c(0,0), limits = c(0, 1.01)) +scale_x_reverse() + theme(legend.position = "bottom", legend.direction = "vertical", legend.title = element_blank())#+ scale_x_continuous(breaks = c(-12, -9, -6, -3, 0)) #+ facet_wrap(~Dataset, scales = "free", nrow = 2)
+
+
+
+########## compare with real correlation structure - mchardy otu-metabolite corrs
+mchardy_otus = melt(fread("Dataset3_otu_table.txt"), id.var = "#OTU ID")
+mchardy_mets = melt(fread("Dataset3_mets.txt"))
+mchardy_all = merge(mchardy_otus, mchardy_mets, by = "variable", allow.cartesian = T)
+mchardy_corrs = mchardy_all[,cor.test(value.x, value.y, method="spearman")[c("estimate", "p.value")], by=list(OTU_ID, Mass)]
+spec_met_corrs[p.value < new_threshold, min(abs(estimate))]
+spec_met_corrs[p.value > new_threshold, max(abs(estimate))]
+mchardy_corrs[!is.na(p.value), prop.table(table(abs(estimate) > 0.4415))]
+
+
+### False positives - species correlations
+species_corrs = rbindlist(lapply(prevalent_spec, function(x){
+  foo = merge(fake_spec[Species==x], fake_spec[Species %in% prevalent_spec & Species !=x], by=c("SimRun", "Sample"))
+  return(foo[,cor(value.x, value.y), by=list(Species.x, Species.y)])
+  }))
+meanCorr = species_corrs[,list(mean(abs(V1)), max(abs(V1)), Species.y[which.max(abs(V1))]), by=Species.x]
+setnames(meanCorr, c("V1", "V2", "V3"), c("meanCorrOtherSpec", "maxCorrOtherSpec", "maxCorrSpecies"))
+spec_met_corrs = merge(spec_met_corrs, meanCorr, by.x = "Species", by.y = "Species.x", all.x = T)
+species_corrs[,median(abs(V1))]
+species_pvals = rbindlist(lapply(prevalent_spec, function(x){
+  foo = merge(fake_spec[Species==x], fake_spec[Species !=x & Species %in% prevalent_spec], by=c("SimRun", "Sample"))
+      return(foo[,cor.test(value.x, value.y)$p.value, by=list(Species.x, Species.y)])
+}))
+species_corrs = merge(species_corrs, species_pvals, by = c("Species.x", "Species.y"), all.x=T)
+
+
+##### False positives
+non_contribs = spec_met_corrs[BinaryContribPos==0]
+non_contribs[,MaxCorr:=sapply(1:nrow(non_contribs), function(x){
+  if(non_contribs[x,Species] %in% prevalent_spec){
+      true_contribs = spec_met_corrs[compound==non_contribs[x,compound] & BinaryContribPos==1]
+  spec_corrs1 = species_corrs[(Species.x==non_contribs[x,Species] & Species.y %in% true_contribs[,Species])|(Species.y==non_contribs[x,Species] & Species.x %in% true_contribs[,Species])]
+  return(spec_corrs1[,V1.x[which.max(abs(V1.x))[1]]])
+  } else {
+    return(NA)
+  }
+})]
+species_corrs[,Qval:=p.adjust(V1.y)]
+species_corrs[Qval < 0.1, min(abs(V1.x))]
+species_corrs[Qval > 0.1, max(abs(V1.x))]
+
+non_contribs[,table(abs(MaxCorr) > 0.545, OutcomeQ=="False positive")]
+non_contribs[Species %in% prevalent_spec,table(abs(MaxCorr) > 0.545, OutcomeQ=="False positive")]
+#Reported in paper
+non_contribs[Species %in% prevalent_spec,fisher.test(table(abs(MaxCorr) > 0.545, OutcomeQ=="False positive"))]
+
+counts_by_spec = spec_met_corrs[,length(unique(compound)), by=list(OutcomeQ,Species)]
+counts_by_spec_wide = dcast(counts_by_spec[!is.na(OutcomeQ)], Species~OutcomeQ, value.var="V1", fill = 0)
+counts_by_spec_wide[,Accuracy:=(`True positive`+`True negative`)/(`True positive`+`True negative`+`False positive`+`False negative`)]
+counts_by_spec_wide[,PPV:=`True positive`/(`True positive`+`False positive`)] #This is PPV
+counts_by_spec_wide[,Specificity:=`True negative`/(`True negative`+`False positive`)]
+
+num_contribs_by_prevalence = spec_met_corrs[,sum(BinaryContribPos), by=list(Species, order)]
+num_counts = fake_spec[,list(length(Sample[value != 0]), mean(value), var(value)), by=Species]
+num_contribs_by_prevalence = merge(num_contribs_by_prevalence, num_counts, by = "Species")
+setnames(num_contribs_by_prevalence, c("Species", "order", "NumContribs", "Prevalence", "MeanAbund", "VarAbund"))
+
+num_contribs_by_prevalence = merge(num_contribs_by_prevalence, counts_by_spec_wide, by = "Species")
+#Is correlation more informative for more prevalent speices?
+
+num_contribs_by_prevalence[NumContribs >= 3, cor.test(Prevalence, Specificity, method = "spearman")] #OK I guess
+
+num_contribs_by_prevalence[,PrevalenceCat:=cut2(Prevalence, quantile(Prevalence, c(0.25, 0.5, 0.75)))]
+
+num_contribs_by_prevalence[,Specificity:=(`True negative`)/(`True negative` + `False positive`)]
+num_contribs_by_prevalence[,Sensitivity:=(`True positive`)/(`True positive` + `False negative`)]
+
+
+num_contribs_by_prevalence = merge(num_contribs_by_prevalence, spec_info[,list(SpeciesID, phylum)], by.x = "Species", by.y = "SpeciesID", all.x = T)
+phylum_colors = c(brewer.pal(3,"Blues")[3], brewer.pal(3,"Reds")[3], brewer.pal(3,"Greens")[3], brewer.pal(3,"Purples")[3], brewer.pal(3,"Oranges")[3])
+num_contribs_by_prevalence[,phylum:=factor(phylum, levels = taxonomy_order[,unique(phylum)])]
+names(phylum_colors) = c("Firmicutes", "Bacteroidetes", "Proteobacteria", "Actinobacteria", "Synergistetes")
+
+prev_plot = ggplot(num_contribs_by_prevalence[NumContribs >= 1], aes(x=PrevalenceCat, y = Specificity, color = phylum)) + geom_beeswarm(priority = "random", cex = 2) + xlab("Number of samples present") + ylab("Species-level specificity") + ylim(0.5, 1.05) + scale_color_manual(values = phylum_colors, name = "") + theme(axis.ticks.x = element_blank())
+
+save_plot(prev_plot, file = "HMPprevalenceSpecPlot.png", base_width = 5.5, base_height = 5)
+
+cat_false_pos = num_contribs_by_prevalence[,sum(`True negative`)/(sum(`True negative`)+sum(`False positive`)), by=PrevalenceCat]
+
+
+
+############ False negatives and metabolite-level properties
+spec_met_corrs = merge(spec_met_corrs, met_summary, by = "compound", all.x = T)
+met_level_outcomes = spec_met_corrs[,list(sum(OutcomeQ=="False positive"), sum(OutcomeQ=="True negative"), sum(OutcomeQ=="False negative"), sum(OutcomeQ=="True positive")), by=list(compound, Mean.y, Variance.y,CoefVar.y, mediaMet)]
+setnames(met_level_outcomes, c("V1", "V2", "V3", "V4"), c("FalsePos", "TrueNeg", "FalseNeg", "TruePos"))
+met_level_outcomes[,Accuracy:=(TrueNeg+TruePos)/(TruePos+FalsePos+TrueNeg+FalseNeg)]
+met_level_outcomes[,PPV:=TruePos/(TruePos+FalsePos)]
+met_level_outcomes[,Spec:=TrueNeg/(TrueNeg+FalseNeg)]
+met_level_outcomes[,Sens:=TruePos/(TruePos+FalseNeg)]
+
+samp_counts = shap_contribs[Species != "Inflow",list(length(SynthSamples[SynthSamples > 0 & VarShare < 0]), length(DegSamples[DegSamples& VarShare > 0]), length(SynthSamples[SynthSamples > 0 & VarShare > 0]), length(DegSamples[DegSamples > 0 & VarShare < 0])), by=list(compound, mediaMet)] 
+samp_counts[V1 > 0 | V4 > 0]#Negative contrib of some sort#[V1 > 0 & V2 > 0]
+samp_counts[,crossfed:=ifelse((V1 > 0 & V2 > 0)|(V3 > 0 & V4 > 0), 1,0)]
+samp_counts[,table(crossfed)]
+
+met_level_outcomes = merge(met_level_outcomes, samp_counts, by=c("compound", "mediaMet"))
+met_level_outcomes[,Synth:=ifelse(V1 > 0 | V3 > 0, "Export", "")]
+met_level_outcomes[,Deg:=ifelse(V2 > 0 | V4 > 0, "Import", "")]
+met_level_outcomes[,Method:=paste0(Synth,Deg)]
+met_level_outcomes[,Method2:=ifelse(Method=="Export", "Exported", "Imported")]
+met_level_outcomes[,Method2:=ifelse(Method=="ExportImport", "Crossfed", Method2)]
+met_level_outcomes[,Method3:=ifelse(Method2=="Imported", "Utilized", "Secreted")]
+met_level_outcomes[,Method3:=ifelse(Method2=="Crossfed", "Cross-fed", Method3)]
+#Secreted, utilized, cross-fed
+
+num_contribs = shap_contribs[Species != "Inflow",sum(BinaryContribPos), by=compound]
+setnames(num_contribs, "V1", "NumContribs")  
+num_neg_contribs = shap_contribs[,list(length(VarShare[VarShare < 0]), length(VarShare[VarShare < -0.05]), length(VarShare[BinaryContribMag==1 & VarShare< 0]), length(VarShare[VarShareMagnitude > 0.05])), by=compound]
+setnames(num_neg_contribs, c("V1", "V2", "V3", "V4"), c("NumNegContrib","NumNeg5", "NumNegKeyPlayer", "NumMag05"))
+max_neg_contrib = shap_contribs[,max(abs(VarShare)[VarShare < 0]), by=compound]
+setnames(max_neg_contrib,"V1", "maxNegContrib")
+met_level_outcomes = merge(met_level_outcomes, spec_counts, by = "compound")
+met_level_outcomes = merge(met_level_outcomes, num_contribs, by = "compound")
+met_level_outcomes = merge(met_level_outcomes, num_neg_contribs, by = "compound")
+met_level_outcomes = merge(met_level_outcomes, max_neg_contrib, by = "compound")
+
+spec_met_corrs = merge(spec_met_corrs, met_level_outcomes[,list(compound, NumContribs, NumNegContrib, Method3)], by="compound", all.x = T)
+
+## Tests
+spec_met_corrs[BinaryContribPos==1,fisher.test(OutcomeQ=="False negative", NumContribs > 1)]
+met_level_outcomes[,fisher.test(crossfed, NumContribs > 1)]
+spec_met_corrs[BinaryContribPos==1, fisher.test(OutcomeQ=="False negative", Method3=="Cross-fed")]
+
+
+met_level_outcomes = merge(met_level_outcomes, dictionary_sub, by.x = "compound", by.y = "medium", all.x = T)
+met_level_outcomes[,sum(crossfed)/length(crossfed), by=Category][order(V1)]
+met_level_outcomes[,sum(FalseNeg)/(sum(FalseNeg)+sum(TruePos)), by=Category][order(V1)]
+category_sens = met_level_outcomes[,sum(TruePos)/(sum(FalseNeg)+sum(TruePos)), by=Category][order(V1)]
+category_sens[grepl("Peptides", Category), Category:="Amino acid metabolites"]
+category_sens[grepl("inorganic", Category), Category:="Metals/inorganic"]
+category_sens[,Category:=factor(Category, levels = category_sens[order(V1, decreasing = T), Category])]
+sens_plot = ggplot(category_sens, aes(x=Category, y = V1)) + geom_bar(stat="identity") + xlab("") + scale_y_continuous(expand = c(0,0), limits = c(0, 0.8), name ="Fraction") + theme(axis.ticks.x = element_blank(), axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5), legend.title = element_blank()) + scale_fill_brewer(palette = "Set2")
+
+
+met_corr_summary = met_level_outcomes[,list(sum(crossfed)/length(crossfed),1-sum(FalseNeg)/(sum(FalseNeg)+sum(TruePos)), length(compound)), by=Category][order(V1)]
+setnames(met_corr_summary, c("V1", "V2", "V3"), c("ShareCrossFed", "Sensitivity", "NumberCompounds"))
+met_corr_summary2 = melt(met_corr_summary, id.var = "Category")
+
+met_corr_summary2[variable=="NumberCompounds", value:=value/sum(value[variable=="NumberCompounds"])]
+
+met_corr_summary2[,Category:=factor(Category, levels = met_corr_summary[order(ShareCrossFed, decreasing = T), Category])]
+levels(met_corr_summary2$Category) = c("Nucleotide metabolites","Organic acids",  "Peptides and amino\nacid metabolites", "Metals and\ninorganic compounds", "Other", "Steroid metabolites","Carbohydrates",  "Vitamins and cofactors")
+met_corr_summary2[variable=="ShareCrossFed", variable:="Share cross-fed metabolites"]
+
+met_category_plot = ggplot(met_corr_summary2[variable != "NumberCompounds"], aes(x=Category, fill = variable, y = value)) + geom_bar(stat="identity", position="dodge") + xlab("") + scale_y_continuous(expand = c(0,0), limits = c(0, 0.8), name ="Fraction") + theme(axis.ticks.x = element_blank(), axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5), legend.title = element_blank()) + scale_fill_brewer(palette = "Set2")
+
+
+```
+
+Arrange all plots
+
+```{r, echo=F, message = F, warning = F}
+composition_plots = plot_grid(order_plot, plot_grid(pcoa_compare_plot + theme(legend.position = "bottom"), met_pca_plot + xlab("PC1 (19.3%)") + ylab("PC2 (10.2%)"), nrow = 1, labels = c("B", "C"), align = "h", axis = "tb"), nrow = 2, labels = c("A", ""))
+
+contrib_plots_hmp = plot_grid(contrib_genus_plot,plot_grid(precision_recall_plot + theme(legend.position = "bottom"), plot_grid(prev_plot + coord_flip() , met_impact_plot+ coord_flip() + xlab("") + ylab("Metabolite-level accuracy") + theme(axis.title.x = element_text()), nrow = 2, align = "v", axis = "lr", labels = c("F", "G")), nrow = 1), nrow =2, labels = c("D","E"), rel_heights = c(1.3, 1))
+figure_6 = plot_grid(composition_plots, contrib_plots_hmp, nrow = 2, rel_heights = c(1, 1.3))
+
+fig6_reduced = plot_grid(spec_plot_all, plot_grid(contrib_plot + theme(legend.title = element_text(size=11), legend.text = element_text(size = 10), axis.text = element_text(size=10), legend.position = c(-0.31, -0.35), legend.justification = "center"), sens_spec_plot_combined_fdr + theme(legend.position = "bottom", legend.title = element_blank(), legend.direction = "vertical", legend.box.just = "top", plot.margin = unit(c(0.05, 0.2, 0.05, 0.05), "inches"), legend.margin = margin(0.02, 0.15, 0.15, 0.02, "inches")), nrow = 1, rel_widths = c(1, 1), labels = c("B", "C")), nrow = 2, rel_heights = c(1.3, 1), labels = c("A", ""))
+save_plot(fig6_reduced, file = "fig6_hmp_reduced.png", base_width =8.5, base_height = 10)
+
+
+save_plot(figure_6, file = "figure6_hmp.png", base_width = 8, base_height = 13)
+
+
+fig_sx_hmp = plot_grid(pcoa_compare_plot, met_pca_plot, prev_plot + theme(legend.text = element_text(size = 11)), met_category_plot + theme(legend.text = element_text(size = 10), axis.text = element_text(size = 9), axis.title.y = element_text(size = 10), legend.position = "bottom"), nrow = 2, labels = c("A", "B", "C", "D"), rel_widths = c(1.25, 1))
+save_plot(fig_sx_hmp, file = "figureSx_hmp.png", base_width = 8, base_height = 7)
+
+
+
+```
