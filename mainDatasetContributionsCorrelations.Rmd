@@ -472,13 +472,13 @@ contribs_spec[,cor.test(V1.x, V1.y, method="spearman")]
 met_counts_melt = melt(contribs_mets[,list(niceLab, V1, V2)], id.var = "niceLab")
 met_counts_melt[variable=="V1", ContribType:="Key contributors"]
 met_counts_melt[variable=="V2", ContribType:="Key players"]
-met_dist_mag = ggplot(met_counts_melt, aes(x=value)) + geom_histogram(binwidth=1, fill = "grey90", col="black") + scale_x_continuous(breaks = c(0,2,4,6,8,10), expand=c(0,0)) + xlab(paste0("Number of key contributors/players")) + theme(strip.background = element_blank(), plot.margin = margin(0.3, 0.3, 0.2, 0.3, "inches")) + ylab("Number of metabolites") + scale_y_continuous(expand=c(0,0)) + facet_wrap(~ContribType)
+met_dist_mag = ggplot(met_counts_melt, aes(x=value)) + geom_histogram(binwidth=1, fill = "grey90", col="black") + scale_x_continuous(breaks = c(0,2,4,6,8,10), expand=c(0,0)) + xlab(paste0("Number of key contributors/players")) + theme(strip.background = element_blank(), plot.margin = margin(0.3, 0.3, 0.2, 0.3, "inches")) + ylab("Number of metabolites") + scale_y_continuous(limits = c(0, 37), expand= c(0,0)) + facet_wrap(~ContribType)
 
 shap_contribs[,Code.x:=factor(Code.x, levels = spec_codes[,Code])]
-num_contribs_tax = ggplot(shap_contribs[BinaryContribPos==1], aes(x=Code.x, fill = Code.x)) + geom_bar(stat="count") + scale_fill_manual(values = col_spec, limits = spec_codes[1:10, Code]) + scale_y_continuous(expand = c(0,0), limits = c(0, 20), name = "Number of key contributions") + theme(axis.ticks = element_blank(), legend.title = element_blank(), plot.margin = margin(0.2, 0.2, 0.2, 0.3, "inches")) + xlab("")
+num_contribs_tax = ggplot(shap_contribs[BinaryContribPos==1], aes(x=Code.x, fill = Code.x)) + geom_bar(stat="count") + scale_fill_manual(values = col_spec, limits = spec_codes[1:10, Code]) + scale_y_continuous(expand = c(0,0), limits = c(0, 20), name = "Number of key contributions") + theme(axis.ticks = element_blank(), legend.title = element_blank(), plot.margin = margin(0.2, 0.1, 0.2, 0.3, "inches")) + xlab("")
 num_players_tax = ggplot(shap_contribs[BinaryContribMag==1], aes(x=Code.x, fill = Code.x)) + geom_bar(stat="count") + scale_fill_manual(values = col_spec, limits = spec_codes[1:10, Code]) + scale_y_continuous(expand = c(0,0), limits = c(0, 24), name = "Number of key players") + theme(axis.ticks = element_blank(), legend.title = element_blank()) + xlab("")
 
-fig_s5 = plot_grid(met_dist_mag,plot_grid(num_contribs_tax, num_players_tax + guides(fill = F), nrow = 1, rel_widths = c(1.25, 1), align = "h", axis = "tb"), nrow = 2, labels = c("A", "B"), rel_heights = c(1,1))
+fig_s5 = plot_grid(met_dist_mag,plot_grid(num_contribs_tax, num_players_tax + guides(fill = F), nrow = 1, rel_widths = c(1.25, 1), align = "h", axis = "tb"), nrow = 2, labels = c("A", "B"), rel_heights = c(1.1,1))
 save_plot(fig_s5, file = "FigureS5_contribProperties.png", base_width = 8, base_height = 6)
 
 
@@ -489,7 +489,7 @@ Correlation Plots (Figure 3)
 
 ```{r, echo=F, message=F, warning=F}
 fake_mets_melt_good = fake_mets_melt[niceLab %in% shap_contribs[,niceLab]]
-
+fake_mets_melt_good[,Sample:=gsub("inout", "", Sample)]
 spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt = fake_mets_melt_good, shap_contribs, outcome_var = "BinaryContribPos")
 
 #How different are relative abundances?
@@ -935,9 +935,19 @@ class_plots = plot_grid(met_accuracy2+ theme(plot.margin = margin(0.5, 0.1, 0.1,
 
 #, plot.margin = margin(0.2, 0.2, 1.5, 0.2, "inches")
 keyplayer_fig = plot_grid(plot_grid(plot_grid(corr_barplot+ theme(plot.margin = margin(0.3, 0.4, 0.05, 0.5, "inches")), ROC_plot1 + theme(plot.margin = margin(0.2, 0.3, 0.2, 0.4, "inches")), nrow = 2, rel_heights = c(1.1, 1), labels = c("A", "B"), label_y = 0.985), class_plots, nrow = 1, rel_widths = c(1, 1.18)), met_impact_plot + coord_flip(ylim = c(0,1.05)) + theme(axis.title.x = element_text(), axis.title.y = element_blank(), plot.margin = margin(0.1, 2.5, 0.1, 0.4, "inches")) + xlim(rev(c("Secreted", "Utilized", "Cross-fed"))), nrow = 2, rel_heights = c(2.5, 1), labels = c("", "E"), label_y = 0.985)
+
                         #  , met_impact_plot, nrow = 1, rel_widths = c(1.1,1.1,0.8), labels = c("", "", "E")) #nrow = 1, labels = c("A", "", ""), label_y = 0.985)#, rel_ = c(1, 1, 1.7))
 save_plot(keyplayer_fig, file = "FigureS_keyPlayers.png", base_width = 9, base_height = 8)
 
+
+#Combine S5 and S6
+class_plots = plot_grid(met_accuracy2+ theme(plot.margin = margin(0.5, 0.1, 0.1, 0.1, "inches")), spec_accuracy2+ theme(plot.margin = margin(0.5, 0.1, 1, 0.1, "inches")), nrow = 1, labels = c("E","F"), rel_widths = c(1.2, 1), label_y = 0.985)
+
+keyplayer_fig = plot_grid(plot_grid(plot_grid(corr_barplot+ theme(plot.margin = margin(0.3, 0.4, 0.05, 0.5, "inches")), ROC_plot1 + theme(plot.margin = margin(0.2, 0.3, 0.2, 0.4, "inches")), nrow = 2, rel_heights = c(1.1, 1), labels = c("C", "D"), label_y = 0.985), class_plots, nrow = 1, rel_widths = c(1, 1.18)), met_impact_plot + coord_flip(ylim = c(0,1.05)) + theme(axis.title.x = element_text(), axis.title.y = element_blank(), plot.margin = margin(0.1, 2.5, 0.1, 0.4, "inches")) + xlim(rev(c("Secreted", "Utilized", "Cross-fed"))), nrow = 2, rel_heights = c(2.5, 1), labels = c("", "G"), label_y = 0.985)
+                        #  , met_impact_plot, nrow = 1, rel_widths = c(1.1,1.1,0.8), labels = c("", "", "E")) #nrow = 1, labels = c("A", "", ""), label_y = 0.985)#, rel_ = c(1, 1, 1.7))
+
+fig_s56 = plot_grid(fig_s5, keyplayer_fig, nrow = 2, rel_heights = c(1.4, 2))
+save_plot(fig_s56, base_width = 9, base_height = 14, file = "Figure_s5_combined.png")
 ```
 
 Compare with Shapley values (Figure S2)

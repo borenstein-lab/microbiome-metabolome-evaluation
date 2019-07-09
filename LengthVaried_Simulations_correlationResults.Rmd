@@ -1,0 +1,271 @@
+---
+title: "Analysis of simulations with environmental fluctuations"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r, echo = F, message=F, warning=F}
+options(stringsAsFactors = F, scipen = 20)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(R.matlab)
+library(RColorBrewer)
+library(mimosa)
+library(Rcpp)
+library(pROC)
+library(vegan)
+library(ape)
+
+datadir = ""
+source("FBA_functions.R")
+
+#Read in original data files
+dat_path = paste0(datadir, "longerTime/")
+spec_files = sort(list.files(path = dat_path, pattern = "specAbunds.txt"))
+met_files = sort(list.files(path = dat_path, pattern = "metAbunds.txt"))
+flux_files = sort(list.files(path = dat_path, pattern = "metFluxesFinal.txt"))
+# 
+timePointsFinal = as.numeric(gsub("longerTime_AGORA", "", gsub("_longTime_specAbunds.txt", "", spec_files)))
+
+# 
+tp_species = rbindlist(lapply(1:length(spec_files), function(x){
+  foo = fread(paste0(dat_path, spec_files[x]))
+}), fill = T)
+
+tp_mets = rbindlist(lapply(1:length(met_files), function(x){
+  foo = fread(paste0(dat_path, met_files[x]))
+}), fill = T)
+
+tp_met_fluxes = rbindlist(lapply(1:length(flux_files), function(x){
+  foo = fread(paste0(dat_path, flux_files[x]))
+}), fill = T)
+
+
+#Data Files
+media_file = "FaithMedia_AGORA_F_final.csv"
+dictionary_file = "Dictionary_AGORA_complete.csv"
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+spec_file = "allSpeciesFinalMain.txt"
+met_file = "allMetabolitesFinalMain.txt"
+all_fluxes_file = "allMetFluxesFinalMain.txt"
+
+
+##Reference information: Media, species IDs & categories, metabolite IDs & categories
+media = fread(media_file)
+media[,V1:=gsub("[e]", "[env]", V1, fixed = T)]
+setnames(media, "V1", "medium")
+
+spec_codes = make_spec_codes()
+
+dictionary = fread(dictionary_file)
+dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
+dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
+dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
+dictionary[,Primary:=gsub("\\(.*\\)$","", Primary)]
+dictionary[Primary=='L-argininium', Primary:="L-arginine"]
+dictionary[Primary=="proton", Primary:="H+"]
+dictionary[Primary=="hydrogenphosphate", Primary:="Orthophosphate"]
+dictionary[grepl("Amylopectin", Primary), Primary:="Amylopectin"]
+setnames(dictionary, "Primary", "Metabolite")
+kegg_translate = dictionary[,list(Metabolite, medium)]
+dictionary[,niceLab:=tolower(Metabolite)]
+
+path_key = fread(met_key_file)
+path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
+path_key[,Metabolite:=NULL]
+
+##Color scale for plotting species
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_spec = c(getPalette(10), "grey50", "grey20")
+names(col_spec) = c(spec_codes[1:10][order(SpeciesName), Code], "in", "out")
+col_spec2 = col_spec
+names(col_spec2) = c(spec_codes[1:10][order(SpeciesName), SpeciesName], "Inflow", "Outflow")
+
+timePointFinal = 577
+
+fake_spec = fread(spec_file)
+fake_spec[,SampleID:=SimRun]
+fake_spec = merge(fake_spec, spec_codes, by = c("Species", "Code"))
+fake_spec[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
+
+fake_mets_melt = fread(met_file) #melt(fake_mets, id.vars=c("Metabolite","medium"), variable.name = "Sample")
+fake_mets_melt = merge(fake_mets_melt, path_key, by.x = c("compound", "niceLab"), by.y = c("medium", "niceLab"), all.x=T)
+
+met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), niceLab]
+met_summary = fake_mets_melt[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+
+all_met_fluxes_final1 = fread(all_fluxes_file)
+all_met_fluxes_final1[,niceLab:=factor(niceLab, levels = met_order)]
+
+shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key)
+shap_contribs1[,niceLab:=factor(tolower(niceLab), levels=met_order)]
+
+var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+contrib_threshold_pos = 0.1
+contrib_threshold_mag = 0.2
+
+shap_contribs1[TrueVar > var_cutoff, unique(niceLab)]
+shap_contribs = shap_contribs1[TrueVar > var_cutoff]
+orig_mets = shap_contribs[,unique(compound)]
+shap_contribs[,noiseLevel:=0]
+shap_contribs[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=list(niceLab, noiseLevel)]
+shap_contribs[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=list(niceLab, noiseLevel)]
+shap_contribs[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+shap_contribs[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+
+
+fake_mets_melt_good = fake_mets_melt[niceLab %in% shap_contribs[,niceLab]]
+spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt_good, shap_contribs)
+
+```
+
+Get species & metabolites with differing time lengths
+
+```{r, echo=F, message=F, warning=F}
+tp_species[,SampleID:=SimRun]
+tp_species[,SpeciesName:=factor(SpeciesName, levels = rev(spec_codes[,SpeciesName]))] #Order by 
+
+#tp_mets = fread(tp_met_file)
+tp_mets = merge(tp_mets, path_key, by = c("medium", "niceLab"), all.x=T)
+
+#tp_met_fluxes = fread(tp_fluxes_file)
+tp_met_fluxes = merge(tp_met_fluxes, path_key, by = "medium", all.x=T)
+tp_met_fluxes[,niceLab:=factor(niceLab, levels = met_order)]
+
+tp_mets_good = tp_mets[medium %in% orig_mets]
+
+setnames(tp_mets_good, "medium", "compound")
+setnames(tp_met_fluxes, "medium", "compound")
+tp_mets_good[,TimePoint:=as.numeric(gsub(".*TP", "", Sample))]
+
+all_shap_contribs = data.table()#shap_contribs
+spec_met_corrs_all = data.table()#spec_met_corrs
+for(j in timePointsFinal){
+  tp_shap = getContributions(tp_met_fluxes[TimePoint==j], spec_codes[Code != "out"], kegg_translate, path_key)
+  tp_shap[,niceLab:=factor(tolower(niceLab), levels=met_order)]
+  tp_shap = tp_shap[compound %in% orig_mets]
+  tp_shap[,PosVarShare:=ifelse(V1 > 0, V1/sum(V1[V1 > 0]),0), by=niceLab]
+  tp_shap[,VarShareMagnitude:=abs(V1)/sum(abs(V1)), by=niceLab]
+  tp_shap[,BinaryContribPos:=ifelse(PosVarShare > contrib_threshold_pos, 1, 0)]
+  tp_shap[,BinaryContribMag:=ifelse(VarShareMagnitude > contrib_threshold_mag, 1, 0)]
+  tp_shap[,TimePoint:=j]
+  all_shap_contribs = rbind(all_shap_contribs, tp_shap, fill = T)
+  spec_met_corrs = get_correlation_contrib_comparison(tp_species[TimePoint==j], tp_mets_good[TimePoint==j], tp_shap)[,list(Species, compound, estimate, p.value, CorTransform, CorScale, CorScaleAbs, TimePoint)]
+  spec_met_corrs[,TimePoint:=j]
+  spec_met_corrs = merge(spec_met_corrs, tp_shap, by = c("Species", "compound", "TimePoint"), all.x = T)
+  spec_met_corrs_all = rbind(spec_met_corrs_all, spec_met_corrs, fill = T)
+}
+
+
+all_shap_contribs[,niceLab:=factor(niceLab, levels=met_order)]
+all_shap_contribs[,mediaMet:=ifelse(compound %in% media[,medium], 1, 0)]
+spec_met_corrs_all[,niceLab:=tolower(Metabolite)]
+
+shap_compare = merge(shap_contribs, all_shap_contribs[TimePoint==577], by = c("compound", "Species"))
+shap_compare[BinaryContribPos.x != BinaryContribPos.y]
+spec_met_corrs = get_correlation_contrib_comparison(fake_spec, fake_mets_melt_good, shap_contribs)
+corr_compare = merge(spec_met_corrs, spec_met_corrs_all[TimePoint==577], by = c("compound", "Species"))
+corr_compare[,summary(estimate.x-estimate.y)] #great
+
+```
+
+
+Get spec-met correlation comparisons
+
+```{r, echo=F, message=F, warning=F}
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==1, "True positive", "True negative")]
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value < 0.01 & BinaryContribPos==0, "False positive", Outcome_v2)]
+spec_met_corrs_all = spec_met_corrs_all[,Outcome_v2:=ifelse(p.value > 0.01 & BinaryContribPos==1, "False negative", Outcome_v2)]
+
+media_mets = media[,medium]
+spec_met_corrs_all[,mediaMet:=ifelse(compound %in% media_mets, 1, 0)]
+
+#Specificity
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=TimePoint]
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=list(mediaMet,TimePoint)]
+#sens
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=TimePoint]
+spec_met_corrs_all[compound %in% orig_mets & BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=list(mediaMet, TimePoint)]
+#ppv
+spec_met_corrs_all[compound %in% orig_mets & p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=TimePoint]
+spec_met_corrs_all[compound %in% orig_mets & p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=list(mediaMet, TimePoint)]
+#accuracy
+spec_met_corrs_all[compound %in% orig_mets, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=TimePoint]
+spec_met_corrs_all[compound %in% orig_mets, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=list(mediaMet,TimePoint)]
+
+spec_met_corrs_all[,sum(BinaryContribPos), by=TimePoint][order(TimePoint)]
+
+all_shap_contribs[,Code2:=ifelse(Code.x=="in", "Inflow", Code.x)]
+all_shap_contribs[,Code2:=factor(Code2, levels = c(spec_codes[1:10, Code], "Inflow"))]
+col_spec1 = col_spec
+names(col_spec1)[11] = "Inflow"
+
+##How many contributors?
+num_contribs_plot = ggplot(all_shap_contribs[compound %in% orig_mets & BinaryContribPos==1][order(TimePoint)], aes(x=TimePoint/4, fill = Code2)) + geom_bar(stat = "count", position = "stack") + scale_fill_manual(values = col_spec1) + scale_y_continuous(expand = c(0, 0, 0.1, 0)) + theme(axis.ticks = element_blank(), legend.title = element_blank()) + xlab("Length of simulation (hr)") + ylab("Number of key contributors") + theme(axis.text = element_text(size=8), axis.title = element_text(size=9), legend.text = element_text(size = 8)) + geom_vline(xintercept = 144, linetype = 2)
+
+#Contributor survival plot
+spec_contribs = all_shap_contribs[,sum(BinaryContribPos), by=list(TimePoint, Code2)] #mediaMet, 
+#spec_contribs[,mediaMet:=ifelse(mediaMet==1, "Inflow metabolites", "Non-inflow metabolites")]
+contrib_survival = ggplot(spec_contribs[Code2 != "Inflow" & Code2 != "Bc"], aes(x=(TimePoint-1)/4, y = V1, col=Code2)) + geom_point(alpha = 0.8) + geom_line()+ scale_color_manual(values = col_spec1) + scale_y_continuous(expand = c(0,0, 0.2, 0.1), name = "Number of key contributions") + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), strip.text = element_text(size=9), legend.text = element_text(size=8)) + xlab("Length of simulation (hr)") + geom_vline(xintercept = 144, linetype = 2) #+ facet_wrap(~mediaMet) 
+
+
+```
+
+Plots of time effect
+
+```{r, echo=F, message=F, warning=F}
+
+spec_met_corrs_all[,CorrResult:=ifelse(p.value < 0.01, "C", "N")]
+spec_met_corrs_all[,BinaryContribWord:=ifelse(BinaryContribPos==1, "Key contributor", "No contribution")]
+
+tp_species[,TimePoint2:=(TimePoint-1)/4]
+#Just show half
+spec_plot = ggplot(tp_species[TimePoint %in% c(sort(timePointsFinal)[seq(1, length(timePointsFinal), by=3)], 577, 5761)], aes(x=factor(SimRun), y = value, fill = SpeciesName)) + geom_bar(position = "fill", stat = "identity") + scale_fill_manual(values = col_spec2) + facet_wrap(~TimePoint2, nrow = 1)+ theme_classic() + scale_y_continuous(expand=c(0,0)) + theme(axis.ticks = element_blank(), legend.title = element_blank(), axis.title = element_text(size=15),axis.text.x = element_blank()) + xlab("Samples") + ylab("Species relative abundance") + scale_size_manual(values = c(0,1)) + guides(col = F, size = F)  + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), strip.text = element_text(size=9), legend.text = element_text(size = 8, face = "italic"), legend.key.size = unit(0.15, "inches"))#+ scale_x_discrete(breaks = c("*"))
+
+spec_met_corrs_all[,TimePoint2:=(TimePoint-1)/4]
+label_dat = data.table(TimePoint2=spec_met_corrs_all[,unique(TimePoint2)], CorrResult="C", y = 420)
+label_dat[,Label:=ifelse(TimePoint2==144, "  *", "")]
+
+barpot_noise2b = ggplot(spec_met_corrs_all[compound %in% orig_mets], aes(x=CorrResult, fill = BinaryContribWord)) + geom_bar(stat="count") + facet_wrap(~TimePoint2, nrow=1) + theme(legend.title = element_blank()) + scale_y_continuous(expand = c(0,0,0.1, 0)) + scale_fill_manual(values = c("grey50","grey80")) + theme(axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text = element_text(size = 7)) + xlab("Correlation status") +ylab("Number of\nspecies-metabolite pairs") + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9),legend.text = element_text(size = 9), panel.spacing = unit(0.03, "inches")) + geom_text(data = label_dat, aes(label = Label, x=CorrResult, y = y), size = 6, inherit.aes = F, fontface = "bold")# + annotate("text", label = "*", size = 5) #+ geom_text(aes(label = NumMetIters))
+
+
+
+```
+
+Add AUCs to sens-spec plot, arrange final figure
+
+```{r, echo=F, message=F, warning=F}
+
+
+
+aucs = data.table(TP= timePointsFinal)
+for(j in 1:nrow(aucs)){
+  roc_vm = roc(spec_met_corrs_all[TimePoint==aucs[j,TP] & compound %in% orig_mets, BinaryContribPos], spec_met_corrs_all[TimePoint==aucs[j,TP]  & compound %in% orig_mets, CorScaleAbs], ci = T, ci.method = "bootstrap", boot.n = 300)
+  aucs[j, AUC:=roc_vm$auc]
+}
+
+
+sens_spec = rbind(data.table(spec_met_corrs_all[BinaryContribPos==0, sum(p.value > 0.01)/length(p.value), by=TimePoint2], Stat="Specificity"), data.table(spec_met_corrs_all[BinaryContribPos==1, sum(p.value < 0.01)/length(p.value), by=TimePoint2], Stat = "Sensitivity"), data.table(spec_met_corrs_all[ p.value < 0.01, sum(BinaryContribPos)/length(p.value), by=TimePoint2], Stat = "PPV"), data.table(spec_met_corrs_all[, sum(grepl("True", Outcome_v2))/length(Outcome_v2), by=TimePoint2], Stat = "Accuracy"))
+aucs[,Stat:="AUC"]
+aucs[,TimePoint2:=(TP-1)/4]
+aucs[,V1:=AUC]
+sens_spec = rbind(sens_spec, aucs, fill = T)
+sens_spec_plot = ggplot(sens_spec, aes(x=TimePoint2, y = V1, color = factor(Stat, levels = c("Sensitivity","AUC","Accuracy", "Specificity", "PPV")))) + geom_line()+geom_point(size = 1.5) + scale_color_manual(values = c(scales::muted("red"), "black", "grey40", scales::muted("blue"), scales::muted("green")), name = "") + xlab("Length of simulation (hr)") + ylab("Fraction") + scale_y_continuous(expand = c(0,0), limits = c(0, 0.9)) + geom_vline(xintercept = 144, linetype = 2) + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), strip.text = element_text(size=9), legend.text = element_text(size = 9))
+
+#Variance plot
+tot_var = spec_met_corrs_all[,mean(TrueVar), by=list(TimePoint2, niceLab)]
+met_var = ggplot(tot_var, aes(x=TimePoint2, y = V1, group=niceLab)) + geom_line(alpha = 0.7, size = 0.4) + geom_point(alpha = 0.7) +xlab("Length of simulation (hr)") + ylab("Metabolite variance") + theme(strip.background = element_blank(), legend.title = element_blank(), axis.text = element_text(size=8), axis.title = element_text(size=9), strip.text = element_text(size=9), legend.text = element_text(size = 9))+ scale_y_log10(label = scales::scientific_format()) + geom_vline(xintercept = 144, linetype = 2)#+ geom_boxplot() + geom_jitter() + scale_y_log10()
+
+#Final figure
+fig_sx = plot_grid(spec_plot, plot_grid(plot_grid(met_var, contrib_survival, nrow = 2, labels = c("B", "C"), align = "v", axis = "lr"), plot_grid(barpot_noise2b, sens_spec_plot, nrow = 2, align = "v", axis = "lr", labels = c("D", "E")), nrow = 1, rel_widths = c(1, 1.35)), nrow = 2, labels = c("A", ""), rel_heights = c(1, 2))
+save_plot(fig_sx, file = "Timelength_change_plot.png", base_width = 13, base_height = 7) 
+
+```
+
+
+
+
+
