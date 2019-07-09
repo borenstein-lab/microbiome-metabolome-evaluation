@@ -1,0 +1,161 @@
+---
+title: "Steady-state/moment-of flux-based definition of contributions"
+output: html_notebook
+---
+
+```{r, echo=F, message=F, warning=F}
+options(stringsAsFactors = F, scipen = 20)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(R.matlab)
+library(RColorBrewer)
+library(mimosa)
+library(Rcpp)
+library(grid)
+
+#File names
+met_key_file = "hmdb_brite_metabolite_classes.txt"
+dictionary_file = "Dictionary_AGORA_complete.csv"
+
+flux_file_long = "longerTime_AGORA5761_longTime_metFluxesFinal.txt"
+flux_file_long_uncorrected = "longerTime_AGORA5761_longTime_metFluxesFinal_w_Outflow.txt"
+met_file_long = "longerTime_AGORA5761_longTime_metAbunds.txt"
+flux_file = "allMetFluxesFinalMain.txt"
+flux_file_uncorrected = "longerTime_AGORA577_longTime_metFluxesFinal_w_Outflow.txt"
+met_file = "allMetabolitesFinalMain.txt"
+
+#Set up/reference files
+source("FBA_functions.R")
+spec_codes = make_spec_codes()
+
+dictionary = fread(dictionary_file)
+dictionary[,medium:=gsub("[e]", "[env]", medium, fixed = T)]
+dictionary[Primary=='L-lysinium(1+)', Primary:="L-lysine"]
+dictionary[,Primary:=gsub(" \\(.*\\)$","", Primary)]
+dictionary[,Primary:=gsub("\\(.*\\)$","", Primary)]
+dictionary[Primary=='L-argininium', Primary:="L-arginine"]
+dictionary[Primary=="proton", Primary:="H+"]
+dictionary[Primary=="hydrogenphosphate", Primary:="Orthophosphate"]
+dictionary[grepl("Amylopectin", Primary), Primary:="Amylopectin"]
+setnames(dictionary, "Primary", "Metabolite")
+kegg_translate = dictionary[,list(Metabolite, medium)]
+#dictionary_sub = dictionary[medium %in% all_mets[,unique(medium)]]
+dictionary[,niceLab:=tolower(Metabolite)]
+
+path_key = fread(met_key_file)
+path_key = merge(path_key, dictionary[,list(niceLab, medium)], by = "niceLab", all = T)
+path_key[,Metabolite:=NULL]
+
+
+```
+
+```{r, echo=F, message=F, warning=F}
+
+compare_steady_state_contributions = function(flux_file, flux_file_uncorrected){
+  all_met_fluxes_final1 = fread(flux_file)
+  if("compound" %in% names(all_met_fluxes_final1)){ setnames(all_met_fluxes_final1, "compound", "medium")}
+  all_met_fluxes_final1 = merge(all_met_fluxes_final1, path_key, by = "medium", all.x = T)
+
+  #Get contributions to totFlux instead
+  fluxes_uncorrect = fread(flux_file_uncorrected)
+  true_met_fluxes = merge(fluxes_uncorrect, spec_codes, by="Species", all.x = T)
+  if("medium" %in% names(true_met_fluxes)) setnames(true_met_fluxes, "medium", "compound")
+  met_fluxes_fill = dcast(true_met_fluxes, compound+SimRun~Species, value.var = "totFlux", fun.aggregate=sum)
+
+  var_shares = rbindlist(lapply(spec_codes[1:11,Species], function(y){
+    all1 = rbindlist(lapply(spec_codes[1:11,Species], function(x){
+      foo = met_fluxes_fill[,cov(get(x), get(y), use="complete.obs"), by=compound]
+      foo[,Species:=x]
+      return(foo)
+    }))
+    all1[,Species2:=y]
+  }))
+  var_shares = var_shares[,sum(V1),by=list(compound, Species)]
+  var_shares = merge(var_shares, spec_codes[,list(Code,Species)], by = "Species")
+  
+  tot_met_fluxes = true_met_fluxes[,sum(totFlux), by = list(compound, SimRun)]
+  true_met_var = tot_met_fluxes[,list(var(V1), mean(V1)), by = compound]
+  setnames(true_met_var, c("V1", "V2"), c("TrueVar", "Mean"))
+  var_shares = merge(var_shares, true_met_var, by="compound")
+  var_shares[,VarShare:=V1/TrueVar]
+
+  #Merge extra info
+  shap_contribs_flux = merge(var_shares, kegg_translate, by.x="compound", by.y = "medium", all.x=T)
+  shap_contribs_flux[,niceLab:=gsub("_e0","",Metabolite)]
+
+  true_met_fluxes2 = merge(all_met_fluxes_final1, spec_codes, by="Species", all.x = T)
+  if("medium" %in% names(true_met_fluxes2)) setnames(true_met_fluxes2, "medium", "compound")
+  met_fluxes_fill2 = dcast(true_met_fluxes2, compound+SimRun~Species, value.var = "totFlux", fun.aggregate=sum)
+
+  var_shares2 = rbindlist(lapply(spec_codes[1:11,Species], function(y){
+    all1 = rbindlist(lapply(spec_codes[1:11,Species], function(x){
+      foo = met_fluxes_fill2[,cov(get(x), get(y), use="complete.obs"), by=compound]
+      foo[,Species:=x]
+      return(foo)
+    }))
+    all1[,Species2:=y]
+  }))
+  var_shares2 = var_shares2[,sum(V1),by=list(compound, Species)]
+  var_shares2 = merge(var_shares2, spec_codes[,list(Code,Species)], by = "Species")
+  
+  tot_met_fluxes2 = true_met_fluxes2[,sum(totFlux), by = list(compound, SimRun)]
+  true_met_var2 = tot_met_fluxes2[,list(var(V1), mean(V1)), by = compound]
+  setnames(true_met_var2, c("V1", "V2"), c("TrueVar", "Mean"))
+  var_shares2 = merge(var_shares2, true_met_var2, by="compound")
+  var_shares2[,VarShare:=V1/TrueVar]
+
+  #Merge extra info
+  shap_contribs_flux2 = merge(var_shares2, kegg_translate, by.x="compound", by.y = "medium", all.x=T)
+  shap_contribs_flux2[,niceLab:=gsub("_e0","",Metabolite)]
+  #shap_contribs_flux = shap_contribs_flux[Metabolite %in% kegg_translate[,Metabolite]]
+
+  #Let's compare with normal contributions
+  shap_contribs1 = getContributions(all_met_fluxes_final1, spec_codes[Code != "out"], kegg_translate, path_key) #-turns out these are the    same with or without outflow which makes sense
+
+  shap_contrib_compare = merge(shap_contribs1, shap_contribs_flux, by = c("Species", "compound"), all = T)
+  shap_contrib_compare = merge(shap_contrib_compare, shap_contribs_flux2, by = c("Species", "compound"), all = T)
+  return(shap_contrib_compare)
+}
+
+
+```
+
+
+```{r, echo=F, message=F, warning=F}
+
+compare_long = compare_steady_state_contributions(flux_file_long, flux_file_long_uncorrected)
+#Key stats
+compare_long[,cor(V1.x, V1.y), by=compound][,mean(V1, na.rm=T)]
+compare_long[,cor(V1.x, V1), by=compound][,mean(V1, na.rm=T)]
+compare_long[,cor(V1.x, V1), by=compound][,min(V1, na.rm=T)]
+compare_long[,cor(V1.x, V1), by=compound][,median(V1, na.rm=T)]
+
+met_data = fread(met_file_long)
+if("medium" %in% names(met_data)) setnames(met_data, "medium", "compound")
+met_summary = met_data[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+compare_long[TrueVar.x > var_cutoff,cor(V1.x, V1.y), by=compound][,mean(V1, na.rm=T)]
+compare_long[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,mean(V1, na.rm=T)]
+compare_long[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,min(V1, na.rm=T)]
+compare_long[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,median(V1, na.rm=T)]
+
+### Same thing for time point 577
+compare_orig = compare_steady_state_contributions(flux_file, flux_file_uncorrected)
+met_data = fread(met_file)
+#Var cutoff
+met_summary = met_data[,list(mean(value,na.rm=T), var(value,na.rm=T), sd(value, na.rm=T)/mean(value, na.rm=T)),by=list(niceLab,compound)]
+setnames(met_summary, c("V1", "V2", "V3"), c("Mean", "Variance", "CoefVar"))
+var_cutoff = met_summary[Variance !=0, quantile(Variance, 0.25)*1.000001] #handle numerical issues
+
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1.y), by=compound][,mean(V1, na.rm=T)]
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1.y), by=compound][,min(V1, na.rm=T)]
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1.y), by=compound][,median(V1, na.rm=T)]
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,mean(V1, na.rm=T)]
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,min(V1, na.rm=T)]
+compare_orig[TrueVar.x > var_cutoff,cor(V1.x, V1), by=compound][,median(V1, na.rm=T)]
+compare_orig[,summary(abs(V1.y-V1))] #No effect of outflow
+
+```
+
