@@ -19,13 +19,15 @@ library(vegan)
 library(ape)
 library(Hmisc)
 library(ggbeeswarm)
+library(pROC)
+theme_set(theme_cowplot())
 
 source("FBA_functions.R")
 
 #Data Files
 media_files = list.files(path = "HMP_media", pattern = "FaithMediaAGORA_HMPexpanded_1_")
 dictionary_file = "Dictionary_AGORA_all_1.csv"
-brite_files = list.files("../../KEGGfiles/KEGG_2018/", pattern = "br.*.keg")[1:3]
+brite_files = list.files(getwd(), pattern = "br.*.keg")[1:3]
 
 met_key_file = "hmdb_brite_metabolite_classes.txt"
 spec_file = "HMP_test577_HMP_noise_specAbunds.txt"
@@ -76,7 +78,7 @@ fake_spec[,order:=factor(order, levels = order_order)]
 fake_spec[,order2:=ifelse(order %in% order_order[1:11], as.character(order), "Other")]
 fake_spec[,order2:=factor(order2, levels = c(order_order[1:11],"Other"))]
 
-getPalette = colorRampPalette(brewer.pal(8, "Set2"))
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))
 
 samp_order_final = paste0("run", 1:57, "__TP577")
 samp_order_first = paste0("run", 1:57, "__TP1")
@@ -107,6 +109,17 @@ Original species abundances:
 
 ```{r, echo=F, message = F, warning = F}
 all_species = fread("HMP_test577_HMP_noise_allSpecies.txt")
+
+all_species[,TimePoint2:=(TimePoint-1)/4]
+all_species2 = all_species[SimRun < 6]
+all_species2 = melt(dcast(all_species2, SimRun+Species~TimePoint2, value.var = "value", fill = 0), id.var = c("SimRun", "Species"))
+most_abund_species = all_species2[,mean(value), by=Species][order(V1, decreasing = T)][1:15]
+
+all_species2[,Species2:=ifelse(Species %in% most_abund_species[,Species], Species, "Other")]
+
+all_species2[,TimePoint:=as.numeric(as.character(variable))]
+spec_time_plot = ggplot(all_species2, aes(x=TimePoint, y = value, color = Species2)) + facet_wrap(~SimRun, nrow = 1) + geom_point(size=0.7) +scale_color_manual(values = getPalette(16)) + theme(strip.background = element_blank(), axis.text = element_text(size=6), legend.text = element_text(size = 9)) + xlab("Time (hr)")+ theme(legend.title = element_blank(), legend.position = "bottom") + ylab("Species abundance") + guides(color = guide_legend(ncol = 3)) + scale_y_continuous(expand = c(0,0)) #+ scale_color_viridis_d(option = "A") #+ scale_color_manual(values)
+save_plot(spec_time_plot, file = "HMP_speciesTimePlot_Sims1to5.png", base_width = 9, base_height = 4)
 orig_abunds = all_species[TimePoint==1]
 orig_abunds[,Sample:=paste0("run", SimRun, "__TP", TimePoint)]
 orig_abunds = merge(orig_abunds, spec_info, by.x = "Species", by.y = "SpeciesID", all.x = T)
@@ -133,7 +146,7 @@ met_order = fake_mets_melt[,var(value), by=niceLab][order(V1, decreasing=T), as.
 met_ids = fake_mets_melt[,unique(medium)]
 
 fake_mets_melt[,compound:=medium]
-dictionary_sub = get_hmp_dictionary(dictionary_file, brite_files = brite_files, mets_melt = fake_mets_melt)
+dictionary_sub = get_hmp_dictionary(dictionary_file, brite_files = brite_files, mets_melt = fake_mets_melt, kegg_path = getwd())
 
 
 
@@ -174,6 +187,19 @@ pcoa_dat[,SimRun:=gsub("__TP.*", "", Sample)]
 pcoa_dat[,TimePoint2:=factor(ifelse(TimePoint==577, "144hr", "Initial"), levels = c("Initial", "144hr"))]
 pcoa_compare_plot = ggplot(pcoa_dat, aes(x=`Axis.1`, y = `Axis.2`, shape = TimePoint2))  + geom_line(aes(group = SimRun), alpha = 0.5) + geom_point(size = 2.5, aes(color = TimePoint2))+ theme(legend.title = element_blank())+ scale_color_brewer(palette = "Set1")
 save_plot(pcoa_compare_plot, file = "HMP_pcoa_compare_plot.png", base_width = 5, base_height = 4)
+
+spec_mat_final = as.matrix(dcast(fake_spec, Sample~Species, value.var = "value", fill = 0))
+samp_order2 = spec_mat_final[,1]
+spec_dist_final = vegdist(apply(spec_mat_final[,2:ncol(spec_mat_final)], 2, as.numeric), method = "bray")
+spec_ord_final = metaMDS(spec_dist_final, trymax = 60, distance = "bray")
+spec_pcoa_final = pcoa(spec_dist_final)
+pcoa_dat_final = data.table(spec_pcoa_final$vectors)
+pcoa_dat_final[,Sample:=samp_order2]
+pcoa_dat_final[,TimePoint:=gsub(".*__TP", "", Sample)]
+pcoa_dat_final[,SimRun:=gsub("__TP.*", "", Sample)]
+pcoa_dat_final[,TimePoint2:=factor(ifelse(TimePoint==577, "144hr", "Initial"), levels = c("Initial", "144hr"))]
+pcoa_final_plot = ggplot(pcoa_dat_final, aes(x=`Axis.1`, y = `Axis.2`)) + geom_point()+ theme(legend.title = element_blank()) + theme_cowplot()#+ scale_color_brewer(palette = "Set1")
+#save_plot(pcoa_compare_plot, file = "HMP_pcoa_compare_plot.png", base_width = 5, base_height = 4)
 
 
 fake_mets_melt[,SimRun:=Run]
@@ -303,7 +329,6 @@ contrib_plot = ggplot(order_counts2, aes(x=Category, y = order, fill = V1)) + ge
 
 ```
 
-
 Correlation Plots (Figure 3)
 
 ```{r, echo=F, message=F, warning=F}
@@ -330,6 +355,41 @@ spec_met_corrs[,Outcome_v2:=ifelse(BinaryContribPos==0 & p.value < 0.01, "False 
 spec_met_corrs[,CorrResult:=ifelse(p.value < 0.01, "Correlated", "Not\ncorrelated")]
 spec_met_corrs[,BinaryWord:=ifelse(BinaryContribPos==1, "Key contributor", "Non-contributor")]
 
+
+```
+
+Example scatter plots
+
+```{r, echo=F, message = F, warning = F}
+### Example scatter plots
+all_dats = merge(fake_spec, fake_mets_melt, by.x = "SimRun", by.y = "Run", allow.cartesian = T) #big table
+all_dats = merge(all_dats, spec_met_corrs, by = c("compound", "Species"))
+setnames(all_dats, "niceLab.y", "niceLab")
+
+#Examples of each result
+#False Pos
+plot1 = ggplot(all_dats[niceLab=="l-serine" & Species=="Ruminococcus_bicirculans_80_3"], aes(x=value.x, y = value.y)) + geom_point() + xlab("R. bicirculans abundance") + ylab("L-serine concentration") + ggtitle("False positive") + annotate("text", x = 1, y = 0.027, label = paste0("Contribution: ", spec_met_corrs[niceLab=="l-serine" & Species=="Ruminococcus_bicirculans_80_3" , round(VarShare, 2)], "\nCorrelation: ", spec_met_corrs[niceLab=="l-serine" & Species=="Ruminococcus_bicirculans_80_3" , round(estimate, 2)], " (", spec_met_corrs[niceLab=="l-serine" & Species=="Ruminococcus_bicirculans_80_3", round(p.value, 4)], ")"), size = 3) + theme(plot.title = element_text(size = 12, hjust = 0.5), axis.text = element_text(size = 10), axis.title = element_text(size = 10))
+
+
+
+plot2 = ggplot(all_dats[niceLab=="maltotriose" & Species=="Bacteroides_vulgatus_ATCC_8482"], aes(x=value.x, y = value.y)) + geom_point() + xlab("B. vulgatus abundance") + ylab("Maltotriose concentration") + ggtitle("True positive") + annotate("text", x = 1.15, y = 0.016, label = paste0("Contribution: ", spec_met_corrs[niceLab=="maltotriose" & Species=="Bacteroides_vulgatus_ATCC_8482", round(VarShare, 2)], "\nCorrelation: ", spec_met_corrs[niceLab=="maltotriose" & Species=="Bacteroides_vulgatus_ATCC_8482", round(estimate, 2)], " (", spec_met_corrs[niceLab=="maltotriose" & Species=="Bacteroides_vulgatus_ATCC_8482", round(p.value, 4)], ")"), size = 3)+ theme(plot.title = element_text(size = 12, hjust = 0.5), axis.text = element_text(size = 10), axis.title = element_text(size = 10))
+
+
+#True Neg
+plot3 = ggplot(all_dats[niceLab=="l-tyrosine" & Species=="Eubacterium_rectale_ATCC_33656"], aes(x=value.x, y = value.y)) + geom_point() + xlab("E. rectale abundance") + ylab("Tyrosine concentration") + ggtitle("True negative") + annotate("text", x = 0.4, y = 0.1, label = paste0("Contribution: ", spec_met_corrs[niceLab=="l-tyrosine"  & Species=="Eubacterium_rectale_ATCC_33656", round(VarShare, 2)], "\nCorrelation: ", spec_met_corrs[niceLab=="l-tyrosine"  & Species=="Eubacterium_rectale_ATCC_33656", round(estimate, 2)], " (", spec_met_corrs[niceLab=="l-tyrosine" & Species=="Eubacterium_rectale_ATCC_33656", round(p.value, 2)], ")"), size = 3)+ theme(plot.title = element_text(size = 12, hjust = 0.5), axis.text = element_text(size = 10), axis.title = element_text(size = 10))
+
+#False Neg
+
+plot4 = ggplot(all_dats[niceLab=="(s)-propane-1;2-diol" & Species=="Subdoligranulum_variabile_DSM_15176"], aes(x=value.x, y = value.y)) + geom_point() + xlab("S. variabile abundance") + ylab("(s)-propane-1;2-diol concentration") + ggtitle("False negative") + annotate("text", x = 0.4, y = 0.9, label = paste0("Contribution: ", spec_met_corrs[niceLab=="(s)-propane-1;2-diol"  & Species=="Subdoligranulum_variabile_DSM_15176", round(VarShare, 2)], "\nCorrelation: ", spec_met_corrs[niceLab=="(s)-propane-1;2-diol"  & Species=="Subdoligranulum_variabile_DSM_15176", round(estimate, 2)], " (", spec_met_corrs[niceLab=="(s)-propane-1;2-diol" & Species=="Subdoligranulum_variabile_DSM_15176", round(p.value, 2)], ")"), size = 3)+ theme(plot.title = element_text(size = 12, hjust = 0.5), axis.text = element_text(size = 10), axis.title = element_text(size = 10))
+
+example_plots = plot_grid(plot1, plot2, plot4,plot3,  labels = c("C", "D", "E", "F"))
+example_plots2 = plot_grid(plot1, plot2, plot4,plot3,  labels = c("C", "D", "E", "F"), nrow = 1)
+
+
+```
+
+Compare with original 10-species dataset
+```{r, echo=F, message = F, warning=F}
 #In order to compare fairly between datasets, use equivalent b-h q-value
 ### Compare with original 10 spec dataset
 spec_file_orig = "allSpeciesFinalMain.txt"
@@ -504,6 +564,7 @@ num_contribs_by_prevalence = merge(num_contribs_by_prevalence, counts_by_spec_wi
 num_contribs_by_prevalence[NumContribs >= 3, cor.test(Prevalence, Specificity, method = "spearman")] #OK I guess
 
 num_contribs_by_prevalence[,PrevalenceCat:=cut2(Prevalence, quantile(Prevalence, c(0.25, 0.5, 0.75)))]
+levels(num_contribs_by_prevalence$PrevalenceCat) = c("1-2", "3-10", "11-28", "29-56")
 
 num_contribs_by_prevalence[,Specificity:=(`True negative`)/(`True negative` + `False positive`)]
 num_contribs_by_prevalence[,Sensitivity:=(`True positive`)/(`True positive` + `False negative`)]
@@ -514,7 +575,8 @@ phylum_colors = c(brewer.pal(3,"Blues")[3], brewer.pal(3,"Reds")[3], brewer.pal(
 num_contribs_by_prevalence[,phylum:=factor(phylum, levels = taxonomy_order[,unique(phylum)])]
 names(phylum_colors) = c("Firmicutes", "Bacteroidetes", "Proteobacteria", "Actinobacteria", "Synergistetes")
 
-prev_plot = ggplot(num_contribs_by_prevalence[NumContribs >= 1], aes(x=PrevalenceCat, y = Specificity, color = phylum)) + geom_beeswarm(priority = "random", cex = 2) + xlab("Number of samples present") + ylab("Species-level specificity") + ylim(0.5, 1.05) + scale_color_manual(values = phylum_colors, name = "") + theme(axis.ticks.x = element_blank())
+#At least 3 to match stat reported in text
+prev_plot = ggplot(num_contribs_by_prevalence[NumContribs >= 3], aes(x=PrevalenceCat, y = Specificity, color = phylum)) + geom_beeswarm(priority = "random", cex = 2) + xlab("Number of samples present") + ylab("Species-level specificity") + ylim(0.5, 1.05) + scale_color_manual(values = phylum_colors, name = "") + theme(axis.ticks.x = element_blank())
 
 save_plot(prev_plot, file = "HMPprevalenceSpecPlot.png", base_width = 5.5, base_height = 5)
 
@@ -552,7 +614,7 @@ num_neg_contribs = shap_contribs[,list(length(VarShare[VarShare < 0]), length(Va
 setnames(num_neg_contribs, c("V1", "V2", "V3", "V4"), c("NumNegContrib","NumNeg5", "NumNegKeyPlayer", "NumMag05"))
 max_neg_contrib = shap_contribs[,max(abs(VarShare)[VarShare < 0]), by=compound]
 setnames(max_neg_contrib,"V1", "maxNegContrib")
-met_level_outcomes = merge(met_level_outcomes, spec_counts, by = "compound")
+#met_level_outcomes = merge(met_level_outcomes, spec_counts, by = "compound")
 met_level_outcomes = merge(met_level_outcomes, num_contribs, by = "compound")
 met_level_outcomes = merge(met_level_outcomes, num_neg_contribs, by = "compound")
 met_level_outcomes = merge(met_level_outcomes, max_neg_contrib, by = "compound")
@@ -593,10 +655,10 @@ met_category_plot = ggplot(met_corr_summary2[variable != "NumberCompounds"], aes
 Arrange all plots
 
 ```{r, echo=F, message = F, warning = F}
-composition_plots = plot_grid(order_plot, plot_grid(pcoa_compare_plot + theme(legend.position = "bottom"), met_pca_plot + xlab("PC1 (19.3%)") + ylab("PC2 (10.2%)"), nrow = 1, labels = c("B", "C"), align = "h", axis = "tb"), nrow = 2, labels = c("A", ""))
+#composition_plots = plot_grid(order_plot, plot_grid(pcoa_compare_plot + theme(legend.position = "bottom"), met_pca_plot + xlab("PC1 (19.3%)") + ylab("PC2 (10.2%)"), nrow = 1, labels = c("B", "C"), align = "h", axis = "tb"), nrow = 2, labels = c("A", ""))
 
-contrib_plots_hmp = plot_grid(contrib_genus_plot,plot_grid(precision_recall_plot + theme(legend.position = "bottom"), plot_grid(prev_plot + coord_flip() , met_impact_plot+ coord_flip() + xlab("") + ylab("Metabolite-level accuracy") + theme(axis.title.x = element_text()), nrow = 2, align = "v", axis = "lr", labels = c("F", "G")), nrow = 1), nrow =2, labels = c("D","E"), rel_heights = c(1.3, 1))
-figure_6 = plot_grid(composition_plots, contrib_plots_hmp, nrow = 2, rel_heights = c(1, 1.3))
+#contrib_plots_hmp = plot_grid(contrib_genus_plot,plot_grid(precision_recall_plot + theme(legend.position = "bottom"), plot_grid(prev_plot + coord_flip() , met_impact_plot+ coord_flip() + xlab("") + ylab("Metabolite-level accuracy") + theme(axis.title.x = element_text()), nrow = 2, align = "v", axis = "lr", labels = c("F", "G")), nrow = 1), nrow =2, labels = c("D","E"), rel_heights = c(1.3, 1))
+#figure_6 = plot_grid(composition_plots, contrib_plots_hmp, nrow = 2, rel_heights = c(1, 1.3))
 
 fig6_reduced = plot_grid(spec_plot_all, plot_grid(contrib_plot + theme(legend.title = element_text(size=11), legend.text = element_text(size = 10), axis.text = element_text(size=10), legend.position = c(-0.31, -0.35), legend.justification = "center"), sens_spec_plot_combined_fdr + theme(legend.position = "bottom", legend.title = element_blank(), legend.direction = "vertical", legend.box.just = "top", plot.margin = unit(c(0.05, 0.2, 0.05, 0.05), "inches"), legend.margin = margin(0.02, 0.15, 0.15, 0.02, "inches")), nrow = 1, rel_widths = c(1, 1), labels = c("B", "C")), nrow = 2, rel_heights = c(1.3, 1), labels = c("A", ""))
 save_plot(fig6_reduced, file = "fig6_hmp_reduced.png", base_width =8.5, base_height = 10)
@@ -605,9 +667,12 @@ save_plot(fig6_reduced, file = "fig6_hmp_reduced.png", base_width =8.5, base_hei
 save_plot(figure_6, file = "figure6_hmp.png", base_width = 8, base_height = 13)
 
 
-fig_sx_hmp = plot_grid(pcoa_compare_plot, met_pca_plot, prev_plot + theme(legend.text = element_text(size = 11)), met_category_plot + theme(legend.text = element_text(size = 10), axis.text = element_text(size = 9), axis.title.y = element_text(size = 10), legend.position = "bottom"), nrow = 2, labels = c("A", "B", "C", "D"), rel_widths = c(1.25, 1))
-save_plot(fig_sx_hmp, file = "figureSx_hmp.png", base_width = 8, base_height = 7)
+fig_sx_hmp = plot_grid(plot_grid(pcoa_compare_plot, met_pca_plot, nrow = 1, labels = c("A", "B"), rel_widths = c(1.25, 1)), example_plots2, plot_grid(prev_plot + theme(legend.text = element_text(size = 11)), met_category_plot + theme(legend.text = element_text(size = 10), axis.text = element_text(size = 9), axis.title.y = element_text(size = 10), legend.position = "bottom"), nrow = 1, labels = c("G", "H"), rel_widths = c(1.25, 1)), nrow = 3, rel_heights = c(1, 0.65, 1))
+save_plot(fig_sx_hmp, file = "figureSx_hmp.png", base_width = 8.7, base_height = 10)
 
 
+#Correlation between flux and abundances
+all_met_fluxes_final1 = merge(all_met_fluxes_final1, fake_spec, by = c("SimRun", "Species", "TimePoint"), all.x = T)
+all_met_fluxes_final1[,cor(abs(cumulFlux), value), by=list(compound, Species)][,summary(V1)]
 
 ```
