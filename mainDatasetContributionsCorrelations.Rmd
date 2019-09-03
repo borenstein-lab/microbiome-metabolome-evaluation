@@ -16,8 +16,7 @@ library(mimosa)
 library(Rcpp)
 library(grid)
 
-homedir = "~/Documents/GS_server/PROJECTS/MORE_METABOLOMICS_CN/"
-datadir = paste0(homedir, "RESULTS/AGORA/")
+
 source("FBA_functions.R")
 
 #Data Files
